@@ -1,0 +1,307 @@
+---
+title: "Admin Panel: Users, Email, Bug Reports, and Push"
+sidebarTitle: "Admin Panel"
+description: "JyutTranslate's internal admin panel manages user plans, usage resets, bug reports, email campaigns, push notifications, and site-wide incident banners."
+---
+
+The JyutTranslate admin panel lives at `#/admin` and gives authorised operators a unified view of every signed-in user, their live and camera usage down to the second, plan status, support history, bug reports, outbound email campaigns, and PWA push notifications. Access is guarded by an email allowlist and an optional database role, so the panel never appears in the UI for normal users.
+
+## Access
+
+Admin access is granted in two ways: an email allowlist set on the API, or an `admin` role assigned directly to a profile. Both methods are checked case-insensitively against every call to `/api/admin/*`. When `entitlement.isAdmin` is `true`, the Account Hub shows an **Admin** link.
+
+```bash title="apps/api/.env"
+# Comma-separated; case-insensitive
+YUE_ADMIN_EMAILS=you@example.com,other@example.com
+```
+
+<Note>
+  Apply migration `supabase/migrations/016_app_settings.sql` on your Supabase project before using the incident banner or app-settings features.
+</Note>
+
+## Incident Banner
+
+JyutTranslate supports a bilingual, site-wide scrolling alert that appears at the top of every page — landing, app, pricing, and admin. Toggle it in `#/admin` under **Site status → Show incident banner**. The default message is:
+
+- **English:** "The app is currently experiencing issues and is being worked on."
+- **中文:** "應用程式目前出現問題，我們正在處理中。"
+
+The banner state is stored in the `app_settings` table (`incident_banner` key) and surfaced on the public health endpoint so the frontend knows to render it without requiring authentication.
+
+```http
+GET /api/health
+```
+
+```json
+{
+  "incidentBanner": true
+}
+```
+
+Every toggle is written to the admin audit log under the `incident_banner` action key.
+
+## User Roles
+
+Two optional roles can be assigned to any profile via the **Role** column in the admin user table. Roles are stored on `profiles.role` and require migration `supabase/migrations/005_user_roles.sql`.
+
+| Role | Badge | Effect |
+|------|-------|--------|
+| `admin` | Blue crown **admin** badge | Grants full admin panel access, same as the email allowlist |
+| `family` | Gold **家** crown badge | Display badge only — no additional entitlements |
+
+```http
+PATCH /api/admin/users/:userId/role
+```
+
+```json
+{ "role": "admin" }
+```
+
+Pass `null` to clear a role. Allowlisted email accounts always show an animated admin badge next to their current plan, regardless of the database role.
+
+## Admin Email Notifications
+
+The API sends React Email notifications to admins via [Resend](https://resend.com) when key events occur. All notification templates share a branded shell — harbor and jade colours, Syne / Noto Sans HK fonts, and the JyutTranslate logo as a CID attachment.
+
+<CardGroup cols={3}>
+  <Card title="Sign-up Alert" icon="user-plus">
+    Fires when a new account is created via the Supabase Auth Hook (`/api/internal/signup-notify`).
+  </Card>
+  <Card title="Upgrade Alert" icon="arrow-up">
+    Fires on Stripe `checkout.session.completed` or a manual plan change in `#/admin` to a paid tier.
+  </Card>
+  <Card title="Bug Report Alert" icon="bug">
+    Fires when a signed-in user submits a bug report — includes issue summary, plan, route, last error, and optional screenshot.
+  </Card>
+</CardGroup>
+
+### Environment Variables
+
+```bash title="apps/api/.env"
+RESEND_API_KEY=re_...
+YUE_NOTIFY_FROM=JyutTranslate <notify@yourdomain.com>
+YUE_SUPPORT_FROM=JyutTranslate Help <help@jyuttranslate.com>
+YUE_ADMIN_NOTIFY_EMAILS=you@example.com
+YUE_NOTIFY_WEBHOOK_SECRET=<long-random-secret>
+```
+
+<Warning>
+  `YUE_NOTIFY_FROM` must be a full email address in `Name <local@domain.com>` format on a Resend-verified domain. A bare domain inside `<>` fails Resend's `from` validation. For testing before domain verification, use `onboarding@resend.dev` — but note it can only deliver to the Resend account owner email.
+</Warning>
+
+`YUE_SUPPORT_FROM` becomes the `Reply-To` header on all outbound mail (auth, household invites, campaigns, admin alerts) so user replies land in your help inbox. It does not need to be a Resend-verified address.
+
+### Supabase Auth Hook (Sign-up Notifications)
+
+Use an Auth Hook instead of a Database Webhook, since many Supabase projects lack the `supabase_functions` schema:
+
+<Steps>
+  <Step title="Open Authentication Hooks">
+    In the Supabase Dashboard go to **Authentication → Hooks**.
+  </Step>
+  <Step title="Add Before User Created Hook">
+    Set type to **HTTP** and URL to `https://<your-api-host>/api/internal/signup-notify`.
+  </Step>
+  <Step title="Copy the Hook Secret">
+    Supabase shows a secret in `v1,whsec_…` format. Add it to Vercel:
+    ```bash
+    SUPABASE_AUTH_HOOK_SECRET=v1,whsec_...
+    ```
+  </Step>
+  <Step title="Redeploy">
+    Redeploy the API. The hook must return HTTP 200 — the endpoint responds with `{}`.
+  </Step>
+</Steps>
+
+### User Auth Emails (React Email + Resend)
+
+By default Supabase sends plain-text auth emails. To enable branded React Email templates for signup confirmation, magic links, password reset, invites, and email-change messages:
+
+<Steps>
+  <Step title="Verify Resend credentials">
+    Confirm `RESEND_API_KEY` and `YUE_NOTIFY_FROM` are set with a verified sending domain.
+  </Step>
+  <Step title="Add the Send Email Hook">
+    In **Supabase Dashboard → Authentication → Hooks → Send Email**, set type to **HTTPS** and URL to `https://<your-api-host>/api/internal/auth-send-email`.
+  </Step>
+  <Step title="Set the hook secret">
+    ```bash
+    SUPABASE_SEND_EMAIL_HOOK_SECRET=v1,whsec_...
+    ```
+  </Step>
+  <Step title="Redeploy">
+    Redeploy the API. Supabase will call this hook instead of its built-in mailer.
+  </Step>
+</Steps>
+
+<Note>
+  This hook is separate from the **Before user created** hook (`SUPABASE_AUTH_HOOK_SECRET`). That one only emails admins; this one emails the signing-in user.
+</Note>
+
+### Resend Audience Sync
+
+When `RESEND_AUDIENCE_ID` is set, signed-in users are automatically upserted into your Resend Audience on three events: new sign-up (Auth Hook), first health or entitlement call each session (returning sign-in), and Stripe checkout completion (paid upgrade).
+
+```bash title="apps/api/.env"
+RESEND_AUDIENCE_ID=your-audience-id-here
+```
+
+Find the ID under **Resend Dashboard → Audiences**. Existing contacts are updated, not duplicated. To backfill all historical users, click **Sync Resend audience** in `#/admin` or call `POST /api/admin/resend-audience/sync`.
+
+## Bug Reports
+
+Users must be signed in to submit bug reports — guests see no footer link and the API returns `401` without a Bearer JWT. Reports are rate-limited to 10 per hour per user.
+
+The admin **Reports** tab presents a self-diagnostic dashboard with interpreted findings, confidence levels, next steps, and a timeline. Smoke/test reports are flagged automatically by heuristics.
+
+<CardGroup cols={2}>
+  <Card title="List Reports" icon="list">
+    ```http
+    GET /api/admin/bug-reports
+    ```
+    Returns all reports with issue type, plan, route, mode, and status.
+  </Card>
+  <Card title="AI Triage" icon="robot">
+    ```http
+    POST /api/admin/bug-reports/:id/ai-answer
+    ```
+    Runs an AI diagnostic pass and recommends close vs. triage.
+  </Card>
+  <Card title="Update Status" icon="pen">
+    ```http
+    PATCH /api/admin/bug-reports/:reportId/status
+    ```
+    Supports bulk status updates via multi-select (long-press or select mode).
+  </Card>
+  <Card title="Technical Payload" icon="code">
+    Raw JSON — route, mode, entitlement snapshot, recent events, environment — stays behind **Show technical payload**. No translation text, audio, or images.
+  </Card>
+</CardGroup>
+
+## Email Hub
+
+The `#/admin` **Email** tab is the full campaign centre powered by React Email and Resend.
+
+<Accordion title="Templates">
+  Built-in layouts include announcement, product update, feature spotlight, newsletter, welcome, and plain. Templates display as thumbnails or a list. Save custom drafts to Supabase (requires migration `007_email_hub.sql`).
+</Accordion>
+
+<Accordion title="Compose">
+  Fill in subject, preview text, eyebrow, headline, body, CTA, and sign-off. A live HTML preview switches between desktop and mobile viewports.
+</Accordion>
+
+<Accordion title="Recipients and Sending">
+  Choose contacts from the Resend audience, enter custom addresses, or broadcast to the full audience via `RESEND_AUDIENCE_ID`. After sending, a popup shows sent/failed counts with per-recipient error details and a domain hint when Resend rejects addresses on a test sender.
+</Accordion>
+
+Email Hub API endpoints:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/admin/email/templates` | List saved templates |
+| `POST` | `/api/admin/email/templates` | Save new template |
+| `DELETE` | `/api/admin/email/templates/:id` | Delete template |
+| `GET` | `/api/admin/email/contacts` | Fetch Resend audience contacts |
+| `POST` | `/api/admin/email/preview` | Render live HTML preview |
+| `POST` | `/api/admin/email/draft` | Save draft |
+| `POST` | `/api/admin/email/send` | Send campaign |
+| `GET` | `/api/admin/email/sends` | List past sends |
+
+<Warning>
+  With `onboarding@resend.dev` as the sender, only your Resend account email receives mail — all other recipients fail at send time. Verify a sending domain before broadcasting to your audience.
+</Warning>
+
+## Push Notifications Hub
+
+The **Push** tab lets admins compose and send Web Push notifications to devices that opted in via **Account Hub → Notifications**.
+
+<Steps>
+  <Step title="Apply the migration">
+    Run `supabase/migrations/024_push_notifications.sql` on your Supabase project.
+  </Step>
+  <Step title="Generate VAPID keys">
+    ```bash
+    npx web-push generate-vapid-keys
+    ```
+  </Step>
+  <Step title="Set environment variables">
+    ```bash
+    VAPID_PUBLIC_KEY=...
+    VAPID_PRIVATE_KEY=...
+    VAPID_SUBJECT=mailto:help@jyuttranslate.com
+    ```
+    `VAPID_SUBJECT` must be a `mailto:` or `https:` URI — Apple rejects bare email addresses.
+  </Step>
+</Steps>
+
+The composer supports: title, body, icon, badge, image, deep link, tag/renotify, require-interaction, silent, lang/dir, vibrate, up to 2 actions, TTL/urgency/topic, and dry-run mode. Targeting options: self, admins, signed-in users, guests, specific plans, user IDs, emails, or everyone.
+
+Push Hub API endpoints:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/admin/push/stats` | Subscription counts by platform |
+| `GET` | `/api/admin/push/sends` | Send history |
+| `POST` | `/api/admin/push/send` | Send push notification |
+
+```json title="POST /api/admin/push/send body"
+{
+  "confirm": true,
+  "payload": { "title": "Update", "body": "New features available" },
+  "targetMode": "all",
+  "dryRun": false,
+  "ttl": 86400,
+  "urgency": "normal"
+}
+```
+
+<Note>
+  Web Push on iOS only works from an **Add to Home Screen** web app (iOS 16.4+). Each device must opt in separately — a desktop subscription does not cover the same account on an iPhone.
+</Note>
+
+## Practice Partner Lab
+
+The admin panel includes a **Practice Partner** live lab for testing the AI Cantonese tutor before it reaches end users. It is available only to admins.
+
+Open the lab in `#/admin` and choose a difficulty and topic combination. Difficulty levels control how much English 港灣 uses in responses:
+
+| Difficulty | Style |
+|------------|-------|
+| New Learner | English majority |
+| ABC | Cantonese majority mix |
+| Mainlander | All Cantonese, stern/mocking register |
+
+Topics span Animals, Foods, Common, and Expert. The lab also exposes Open chat (free talk, no ladder) and 22 situational scenarios across Food, Getting around, Shopping, People, and The city.
+
+API endpoint: `POST /api/admin/practice-partner/chat` (body: `{ messages, activeDrill?, category?, difficulty?, streak?, missStreak?, move?, nextMove?, review?, lastMiss? }`). Returns `{ reply, drill, beats }`.
+
+## User Management Actions
+
+<CardGroup cols={2}>
+  <Card title="Reset Month Usage" icon="rotate-left">
+    Zeros live / TTS / translate / camera / docs usage for the selected month.
+    ```http
+    POST /api/admin/users/:userId/reset-usage
+    ```
+  </Card>
+  <Card title="Export Users CSV" icon="file-csv">
+    Downloads current filters + month, including camera, docs, Harbor, and Practice Partner fields.
+    ```http
+    GET /api/admin/users.csv
+    ```
+  </Card>
+  <Card title="Household Usage Backfill" icon="database">
+    Folds legacy per-user `usage_months` into `household_usage_months`. Idempotent — safe to re-run.
+    ```http
+    POST /api/admin/household-usage/backfill
+    ```
+  </Card>
+  <Card title="Admin Audit Log" icon="scroll">
+    Returns recent admin actions (plan changes, bans, role updates, banner toggles).
+    ```http
+    GET /api/admin/audit
+    ```
+  </Card>
+</CardGroup>
+
+The full user list shows: email, name, plan, live `Hh Mm Ss`, TTS chars, translate count, camera time and scan count, AI vision count, Harbor Quest correct answers, Practice Partner turns, and docs pages. Supports search/filter by email, name, ID, plan, over-quota, and banned status, plus sorting on every usage column.

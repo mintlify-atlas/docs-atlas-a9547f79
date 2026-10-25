@@ -1,0 +1,245 @@
+---
+title: "Entitlements, Usage Gates, and Rate Limits"
+sidebarTitle: "Entitlements"
+description: "How JyutTranslate resolves plan entitlements per request, guest identity anchoring, per-endpoint usage gates, and in-memory rate limit buckets."
+---
+
+Every API request that touches a metered capability first resolves an entitlement snapshot — a single JSON object describing the caller's plan, current usage, remaining allowances, and per-feature `allowed` flags. This page explains the snapshot shape returned by `/api/entitlement` and `/api/health`, how guest identity is anchored across cookie wipes, which endpoint checks which gate, and the in-memory rate-limit buckets that guard unauthenticated traffic.
+
+## Entitlement snapshot
+
+Both `/api/health` and `/api/entitlement` return the same snapshot object. The example below shows a signed-in Free user two seconds into their first live session this month.
+
+```json title="GET /api/entitlement — Free user example"
+{
+  "loggedIn": true,
+  "requireLogin": true,
+  "plan": "free",
+  "limits": {
+    "plan": "free",
+    "live_minutes": 60,
+    "tts_chars": 30000,
+    "camera_scans": 120,
+    "docs_pages": 40,
+    "auto_speak": false,
+    "can_live": true,
+    "can_camera": true,
+    "can_docs": true,
+    "text_translate": true
+  },
+  "usage": {
+    "month": "2026_08",
+    "liveSeconds": 120,
+    "ttsChars": 800,
+    "translateCount": 3,
+    "cameraSeconds": 40,
+    "cameraTranslateCount": 2,
+    "docsPages": 4,
+    "aiVisionCount": 2
+  },
+  "remaining": {
+    "liveSeconds": 3480,
+    "ttsChars": 29200,
+    "cameraScans": 118,
+    "cameraSeconds": -1,
+    "docsPages": 36,
+    "aiVisionCount": 198
+  },
+  "ttsUnlimited": false,
+  "cameraUnlimited": false,
+  "docsUnlimited": false,
+  "allowed": {
+    "live": true,
+    "autoSpeak": false,
+    "textTranslate": true,
+    "tts": true,
+    "camera": true,
+    "docs": true,
+    "aiVision": true
+  },
+  "prefs": {
+    "ttsVoiceYue": "zh-HK-HiuMaanNeural",
+    "ttsVoiceEn": "en-US-JennyNeural",
+    "autoSpeak": false,
+    "username": null,
+    "usernameChangedAt": null
+  },
+  "upgradeUrl": "https://www.jyuttranslate.com/#/pricing",
+  "loginUrl": null,
+  "reason": null
+}
+```
+
+<Note>
+  Family and Business snapshots return `ttsUnlimited: true` and `limits.tts_chars: 0`. Business additionally sets `cameraUnlimited: true` and `docsUnlimited: true` with `limits.camera_scans: 0` and `limits.docs_pages: 0`. Any `remaining` field equal to `-1` signals an unlimited meter — never block on that value.
+</Note>
+
+## Top-level fields
+
+<ResponseField name="loggedIn" type="boolean">
+  `true` when the request carries a valid Supabase session cookie.
+</ResponseField>
+
+<ResponseField name="requireLogin" type="boolean">
+  Reflects the `YUE_REQUIRE_LOGIN` environment variable. When `true`, guests cannot start a live or camera session without signing in.
+</ResponseField>
+
+<ResponseField name="plan" type='"guest" | "free" | "family" | "business"'>
+  The effective plan for this request. For household members this is the **owner's** Stripe plan, not the member's personal `profiles.plan` row.
+</ResponseField>
+
+<ResponseField name="limits" type="object">
+  Hard caps for the plan. `0` means no hard cap (unlimited). `can_live`, `can_camera`, and `can_docs` are `false` when the feature is disabled by environment flags.
+</ResponseField>
+
+<ResponseField name="usage" type="object">
+  The caller's cumulative usage for the current calendar month (`YYYY_MM`). For Family and Business members, this reflects the **pooled** `household_usage_months` row, not just the individual member's contribution. The personal share is in `usageSelf` (present when the household has more than one occupied seat).
+</ResponseField>
+
+<ResponseField name="remaining" type="object">
+  Pre-computed deltas: `limit − usage`. Sentinel `-1` means the meter is unlimited or is tracking-only (e.g. `cameraSeconds` is always `-1` — heartbeat logging only, not a hard gate).
+</ResponseField>
+
+<ResponseField name="ttsUnlimited" type="boolean">
+  `true` for Family and Business. TTS usage is still counted for admin reporting but never blocks the speaker.
+</ResponseField>
+
+<ResponseField name="cameraUnlimited" type="boolean">
+  `true` for Business only. Camera scan usage is still counted.
+</ResponseField>
+
+<ResponseField name="docsUnlimited" type="boolean">
+  `true` for Business only. Document page usage is still counted.
+</ResponseField>
+
+<ResponseField name="upgradeUrl" type="string">
+  Constructed from `YUE_APP_URL` as `{appUrl}/#/pricing`. Embed in UI upgrade prompts.
+</ResponseField>
+
+<ResponseField name="loginUrl" type="string | null">
+  Constructed as `{appUrl}/?auth=1#/app`. `null` for signed-in users.
+</ResponseField>
+
+<ResponseField name="reason" type="string | null">
+  Machine-readable reason why the first exhausted gate fired, e.g. `"live_quota_exhausted"`, `"tts_quota_exhausted"`, `"camera_quota_exhausted"`, `"docs_quota_exhausted"`, `"ai_vision_quota_exhausted"`, `"guest_trial_exhausted"`, `"account_disabled"`. `null` when all gates pass.
+</ResponseField>
+
+## The `allowed` object
+
+The `allowed` object is the primary gate signal. Endpoints check the relevant boolean before consuming a credit.
+
+<ResponseField name="allowed.live" type="boolean">
+  `true` when `limits.can_live` is set and remaining live seconds is greater than 0.
+</ResponseField>
+
+<ResponseField name="allowed.autoSpeak" type="boolean">
+  `true` only for Family and Business with TTS still available. Guests and Free users are always `false`.
+</ResponseField>
+
+<ResponseField name="allowed.textTranslate" type="boolean">
+  `true` for all plans including Guest. Text translate and Jyutping breakdown are never metered-off.
+</ResponseField>
+
+<ResponseField name="allowed.tts" type="boolean">
+  `true` for Guest (unlimited trial), Family, Business. For Free: `true` while `remaining.ttsChars > 0`.
+</ResponseField>
+
+<ResponseField name="allowed.camera" type="boolean">
+  `true` while scan credits remain (`remaining.cameraScans > 0`) or `cameraUnlimited` is set.
+</ResponseField>
+
+<ResponseField name="allowed.docs" type="boolean">
+  `true` while doc pages remain (`remaining.docsPages > 0`) or `docsUnlimited` is set. Always `false` for Guest.
+</ResponseField>
+
+<ResponseField name="allowed.aiVision" type="boolean">
+  `true` while `remaining.aiVisionCount > 0`. Hard monthly cap on all plans — never unlimited. Azure Read OCR still runs when this is exhausted; only the multimodal LLM fallback is blocked.
+</ResponseField>
+
+## The `prefs` object
+
+User preferences synced across devices via `PATCH /api/prefs/auto-speak` and related endpoints. Guests receive default values and cannot persist preferences.
+
+<ResponseField name="prefs.ttsVoiceYue" type="string">
+  Azure Neural voice name for Cantonese TTS (e.g. `"zh-HK-HiuMaanNeural"`).
+</ResponseField>
+
+<ResponseField name="prefs.ttsVoiceEn" type="string">
+  Azure Neural voice name for English TTS (e.g. `"en-US-JennyNeural"`).
+</ResponseField>
+
+<ResponseField name="prefs.autoSpeak" type="boolean">
+  Cross-device Auto-speak preference stored in `profiles.auto_speak`. Playback is still gated by `allowed.autoSpeak` (Family/Business only).
+</ResponseField>
+
+<ResponseField name="prefs.username" type="string | null">
+  Custom display username. `null` until the user sets one.
+</ResponseField>
+
+<ResponseField name="prefs.usernameChangedAt" type="string | null">
+  ISO 8601 timestamp of the last username change. `null` if never set.
+</ResponseField>
+
+## Gate points by endpoint
+
+Usage writes go through the `increment_usage` Supabase RPC (migrations `003`–`010`) so concurrent counters never overwrite each other.
+
+| Endpoint | Gate checked |
+|---|---|
+| `GET /api/speech-token` | `allowed.live` — prepaid ≤ 60 s live debit, TTL ≤ 180 s |
+| `POST /api/usage/heartbeat` | `allowed.live`, then adds seconds |
+| `POST /api/tts` | Free: `remaining.ttsChars`; Family/Business: always passes (usage counted) |
+| `POST /api/translate` | `allowed.textTranslate` (guests OK); increments `translateCount` |
+| `POST /api/breakdown` | Same as `/translate` |
+| `POST /api/camera/scan` | `allowed.camera` (scan credits) — or `allowed.docs` when `forDocs: true` (no camera scan charge) |
+| `POST /api/usage/camera-heartbeat` | `limits.can_camera` (logging only) — adds `cameraSeconds`; does **not** gate on scan credits |
+| `POST /api/docs/translate` | `allowed.docs` — Office/TXT; bills pages on success |
+| `POST /api/docs/segments` | `allowed.docs` — PDF text batch; bills estimated pages (prepaid) |
+| `POST /api/docs/commit` | Signed-in docs — bills remaining PDF pages after success (`pages - prepaidPages`) |
+
+## Guest identity resolution
+
+Guests do not have a Supabase session, so the API anchors their trial usage to a stable identity resolved in the following order:
+
+<Steps>
+  <Step title="Device ID (localStorage)">
+    The SPA stores a UUID in `localStorage` and sends it as the `X-Yue-Guest-Device` request header on every API call. This identity survives a cookie wipe and most IP or VPN changes as long as the browser profile is intact.
+  </Step>
+  <Step title="Network registry (sha256 of IP + month)">
+    The server maps `sha256(ip|month)` to a guest ID in the `guest_network_trials` table. This survives a cookie wipe on the same network, protecting the trial budget from simple cookie-deletion abuse.
+  </Step>
+  <Step title="IP + month fallback">
+    When neither mapping exists the server derives a deterministic guest ID from the caller's IP address and the current calendar month. Shared NAT (e.g. a café) will share one network trial — this is intentional.
+  </Step>
+</Steps>
+
+On sign-in, usage accumulated in `guest_usage_months` is merged into the new user record using all three candidate identities (cookie, device, and network).
+
+## Guest per-IP rate limits
+
+These in-memory fixed 1-minute window buckets apply only to unauthenticated traffic. Signed-in users are not subject to them. Because Vercel can run multiple instances, these are best-effort — pair with Vercel Firewall or WAF for a hard edge cap on all `/api*` routes.
+
+| Bucket | Endpoint | Env variable | Default |
+|---|---|---|---|
+| `translate` | `POST /api/translate` | `YUE_GUEST_RL_TRANSLATE_PER_MIN` | `30` req / min |
+| `breakdown` | `POST /api/breakdown` | `YUE_GUEST_RL_BREAKDOWN_PER_MIN` | `20` req / min |
+| `speechToken` | `GET /api/speech-token` | `YUE_GUEST_RL_SPEECH_TOKEN_PER_MIN` | `12` req / min |
+| `cameraScan` | `POST /api/camera/scan` | `YUE_GUEST_RL_CAMERA_SCAN_PER_MIN` | `20` req / min |
+
+<Note>
+  TTS (`POST /api/tts`) is intentionally **not** rate-limited by IP for guests — it is a product choice to keep tap-to-play accessible. TTS usage is still recorded in `guest_usage_months`.
+</Note>
+
+## Other rate limits
+
+The following buckets apply to signed-in users and are keyed by user ID or client IP as noted.
+
+| Bucket | Endpoint | Env variable | Default | Key |
+|---|---|---|---|---|
+| `pushSubscribe` | `POST /api/push/subscribe` (and unsubscribe) | `YUE_PUSH_SUBSCRIBE_RL_PER_MIN` | `20` req / min | Client IP |
+| `harborPut` | `PUT /api/harbor-quest` | `YUE_HARBOR_PUT_RL_PER_MIN` | `120` req / min | Signed-in user ID |
+| `harborGift` | `POST /api/harbor-quest/gift` | `YUE_HARBOR_GIFT_RL_PER_MIN` | `30` req / min | Signed-in user ID |
+
+<Warning>
+  All rate-limit buckets are in-memory and do not persist across process restarts or across Vercel edge instances. For strict enforcement add a Vercel Firewall rule targeting `/api*`.
+</Warning>

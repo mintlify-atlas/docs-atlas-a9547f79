@@ -1,0 +1,265 @@
+---
+title: "Household Seats and Pooled Usage for Family Plans"
+sidebarTitle: "Household"
+description: "Family and Business plans support multiple seats with pooled monthly usage. Learn how to invite members, manage seats, and understand shared meter attribution."
+---
+
+JyutTranslate's Family and Business plans support multi-seat households where every member shares one pooled monthly usage allowance. The plan owner's Stripe subscription governs the entire household — members do not need their own paid plan. This page covers how to invite members, how monthly meters are pooled and attributed, and the full household API surface.
+
+## Seat limits
+
+| Plan | Seats |
+|---|---|
+| **Family** | 4 (owner + 3 members) |
+| **Business** | 10 (owner + 9 members) |
+
+Seat count is enforced at invite time: if all seats are occupied (including pending invites), the invite API returns `seats_full`. The limit is stored in `households.seat_limit` and is automatically synced whenever the owner's Stripe plan changes.
+
+## How pooled usage works
+
+When a paid owner's household is first created, the current month's meters are copied into a new `household_usage_months` row. From that point on, every usage increment dual-writes to two places:
+
+1. **`household_usage_months`** — the shared pool that all members draw from and that the entitlement snapshot reflects.
+2. **`usage_months`** (personal) — per-member ring attribution retained for admin reporting and for the `usageSelf` field in the entitlement snapshot.
+
+The entitlement returned to every household member always reflects the pooled `household_usage_months` row, so all members see the same shared `remaining` values. An individual member's personal contribution is available in `entitlement.usageSelf` (present when the household has more than one occupied seat).
+
+<Info>
+  For a solo household (1 occupied seat), `usageSelf` is set to the pooled totals so the owner does not appear to have zero personal usage in the admin panel.
+</Info>
+
+### Legacy backfill
+
+Before migrations `011`–`015` were applied, usage was written only to per-member `usage_months` rows. The `resolveHouseholdUsage` function automatically detects when personal rows exceed the pool total and merges them in — this handles incremental backfill transparently on each request. To explicitly backfill all historical months for every household at once, call the admin endpoint:
+
+```http title="POST /api/admin/household-usage/backfill"
+POST /api/admin/household-usage/backfill
+Authorization: Bearer <admin-session-token>
+```
+
+The response reports how many households were created or synced and how many months were processed:
+
+```json
+{
+  "householdsEnsured": 2,
+  "householdsMerged": 5,
+  "monthsMerged": 14
+}
+```
+
+## Database migrations
+
+Migrations `011`–`015` in `supabase/migrations/` implement the household schema. Apply them via the combined helper script or individually in the Supabase SQL Editor.
+
+<Accordion title="Migration summary (011–015)">
+  | Migration | File | Purpose |
+  |---|---|---|
+  | `011` | `011_rename_pro_plan_to_family.sql` | Renames the legacy `pro` plan to `family` across profiles |
+  | `012` | `012_household_seats_pooled_usage.sql` | Creates `households`, `household_members`, `household_invites`, and `household_usage_months` tables |
+  | `013` | `013_profiles_username.sql` | Adds `username` and `username_changed_at` columns to `profiles` |
+  | `014` | `014_rename_max_plan_to_business.sql` | Renames the legacy `max` plan to `business` |
+  | `015` | `015_backfill_household_usage_from_legacy.sql` | One-time SQL backfill of `household_usage_months` from existing `usage_months` rows |
+
+  Use `apply_011_through_015_household.sql` to run all five migrations in a single transaction.
+</Accordion>
+
+## Household API
+
+All household endpoints require a valid Supabase session (signed-in user). Owner-only operations return `403 Forbidden` if called by a member.
+
+### GET /api/household
+
+Returns the household summary for the authenticated user, including members and pending invites. Email addresses are included in the response (requires Auth `getUserById` for each member).
+
+```http title="GET /api/household"
+GET /api/household
+Authorization: Bearer <session-token>
+```
+
+```json title="200 OK"
+{
+  "household": {
+    "id": "uuid",
+    "plan": "family",
+    "seatLimit": 4,
+    "seatUsed": 2,
+    "role": "owner",
+    "pooled": true,
+    "members": [
+      {
+        "userId": "uuid-owner",
+        "role": "owner",
+        "email": "owner@example.com",
+        "joinedAt": "2026-01-15T10:00:00Z"
+      },
+      {
+        "userId": "uuid-member",
+        "role": "member",
+        "email": "member@example.com",
+        "joinedAt": "2026-02-01T09:00:00Z"
+      }
+    ],
+    "pendingInvites": [
+      {
+        "id": "invite-uuid",
+        "email": "pending@example.com",
+        "createdAt": "2026-08-01T12:00:00Z",
+        "expiresAt": "2026-08-08T12:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+### POST /api/household/invites
+
+Sends an invite to the specified email address. Requires the caller to be a plan owner on Family or Business. An invite email is dispatched via Resend when `RESEND_API_KEY` and `YUE_NOTIFY_FROM` are configured.
+
+```http title="POST /api/household/invites"
+POST /api/household/invites
+Authorization: Bearer <session-token>
+Content-Type: application/json
+
+{
+  "email": "newmember@example.com"
+}
+```
+
+```json title="201 Created"
+{
+  "ok": true,
+  "inviteSent": true,
+  "emailed": true,
+  "acceptUrl": "https://www.jyuttranslate.com/?invite=<token>#/app",
+  "invite": {
+    "id": "invite-uuid",
+    "email": "newmember@example.com",
+    "createdAt": "2026-08-05T14:00:00Z",
+    "expiresAt": "2026-08-12T14:00:00Z"
+  },
+  "household": { "...": "updated summary" },
+  "entitlement": { "...": "caller's updated entitlement" }
+}
+```
+
+**Error codes**
+
+| HTTP | Code | Meaning |
+|---|---|---|
+| `403` | `plan_required` | Caller is not on Family or Business |
+| `403` | `forbidden` | Caller is a member, not the owner |
+| `409` | `seats_full` | All seats (including pending invites) are occupied |
+| `409` | `already_invited` | A pending invite for this email already exists |
+| `400` | `invalid_email` | Email address failed basic format validation |
+| `400` | `self_invite` | Owner tried to invite their own email |
+
+### POST /api/household/accept
+
+Accepts a pending invite using the token from the invite email link. The authenticated user's email must match the invited address exactly.
+
+```http title="POST /api/household/accept"
+POST /api/household/accept
+Authorization: Bearer <session-token>
+Content-Type: application/json
+
+{
+  "token": "<invite-token-from-url>"
+}
+```
+
+```json title="200 OK"
+{
+  "ok": true,
+  "household": { "...": "updated summary" },
+  "entitlement": { "...": "caller's updated entitlement with new plan" }
+}
+```
+
+**Error codes**
+
+| HTTP | Code | Meaning |
+|---|---|---|
+| `400` | `invalid_token` | Token not found in `household_invites` |
+| `400` | `not_pending` | Invite has already been accepted, revoked, or expired |
+| `400` | `expired` | Invite expired (> 7 days after creation) |
+| `409` | `email_mismatch` | Signed-in email does not match the invited email |
+| `409` | `already_in_household` | User is already a member of a different household |
+| `400` | `seats_full` | Household filled up between invite creation and acceptance |
+
+### DELETE /api/household/invites/:id
+
+Revokes a pending invite by its ID. Owner only.
+
+```http title="DELETE /api/household/invites/:id"
+DELETE /api/household/invites/invite-uuid
+Authorization: Bearer <session-token>
+```
+
+```json title="200 OK"
+{
+  "ok": true,
+  "household": { "...": "updated summary" },
+  "entitlement": { "...": "caller's updated entitlement" }
+}
+```
+
+### DELETE /api/household/members/:userId
+
+Removes a member from the household. Owner only; the owner cannot remove themselves.
+
+```http title="DELETE /api/household/members/:userId"
+DELETE /api/household/members/uuid-member
+Authorization: Bearer <session-token>
+```
+
+```json title="200 OK"
+{
+  "ok": true,
+  "household": { "...": "updated summary" },
+  "entitlement": { "...": "caller's updated entitlement" }
+}
+```
+
+**Error codes**
+
+| HTTP | Code | Meaning |
+|---|---|---|
+| `403` | `forbidden` | Caller is not the owner |
+| `400` | `cannot_remove_owner` | Owner tried to remove themselves |
+
+## Member invitation flow
+
+The following steps describe the full end-to-end experience from an owner's invite to a member's first session.
+
+<Steps>
+  <Step title="Owner sends invite">
+    The owner opens Account Hub, navigates to the Household section, and enters the invitee's email address. The app calls `POST /api/household/invites`, which creates a row in `household_invites` with a cryptographically random 24-byte token and sends an invite email via Resend.
+  </Step>
+  <Step title="Invitee receives email">
+    The invite email contains an **Accept invite** button linking to `{YUE_APP_URL}/?invite=<token>#/app`. The invite is valid for 7 days from creation.
+  </Step>
+  <Step title="Invitee signs in">
+    If the invitee is not yet signed in, the app detects the `?invite=` query parameter and prompts sign-in. The token is preserved in the URL so it is available after the auth redirect.
+  </Step>
+  <Step title="Invitee accepts">
+    The app calls `POST /api/household/accept` with the token. The server verifies the token, checks that the signed-in email matches the invited email, confirms a seat is still available, inserts a `household_members` row, and marks the invite as `accepted`. The response includes the invitee's updated entitlement, now reflecting the owner's plan and pooled usage meters.
+  </Step>
+  <Step title="Pooled usage takes effect">
+    From this point on, every entitlement snapshot for the new member reflects `household_usage_months` for the shared pool. The member's personal `usage_months` row continues to receive dual-write attribution for admin reporting.
+  </Step>
+</Steps>
+
+<Warning>
+  Members must sign in with the exact email address that was invited. Signing in with a different email (even an alias) will result in a `409 email_mismatch` error. The owner must revoke the original invite and send a new one to a different address if needed.
+</Warning>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Plans Overview" icon="table" href="/plans/overview">
+    Seat counts and monthly meter limits for all four plan tiers.
+  </Card>
+  <Card title="Entitlements & Gates" icon="shield-check" href="/plans/entitlements">
+    How the entitlement snapshot is resolved and which endpoints check which gates.
+  </Card>
+</CardGroup>

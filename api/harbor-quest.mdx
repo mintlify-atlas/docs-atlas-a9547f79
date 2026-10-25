@@ -1,0 +1,325 @@
+---
+title: "Harbor Quest and Practice Partner API"
+sidebarTitle: "Harbor Quest"
+description: "Harbor Quest and Practice Partner endpoints track Cantonese learning progress, XP, leaderboards, and AI conversation drills for signed-in users."
+---
+
+Harbor Quest is JyutTranslate's Cantonese learning game: a Hong Kong harbour RPG where users earn XP, gold, and cosmetic gear by answering vocabulary questions correctly. Practice Partner is a companion feature providing AI-powered Cantonese conversation drills. Both features maintain global leaderboards and persist progress per signed-in user. All endpoints require a valid Supabase JWT unless otherwise noted.
+
+## Harbor Quest endpoints
+
+### GET /api/harbor-quest
+
+Returns the signed-in user's saved Harbor Quest progress blob. If no progress exists yet, the server returns a sanitised default state (empty cleared list, starter gear, 40 coins).
+
+**Auth required:** Yes.
+
+### Response
+
+```json title="200 OK"
+{
+  "progress": {
+    "cleared": ["quest-1", "quest-2"],
+    "stepCursor": {},
+    "correctCount": 47,
+    "gold": 320,
+    "xp": 1250,
+    "missionClears": { "pier-1": 3 },
+    "coins": 40,
+    "owned": ["hat-straw", "top-harbor", "bottom-travel", "shoes-leather", "hand-none", "boat-canoe", "lantern-paper-amber"],
+    "banked": [],
+    "look": {
+      "hat": "hat-straw",
+      "top": "top-harbor",
+      "bottom": "bottom-travel",
+      "shoes": "shoes-leather",
+      "hand": "hand-none",
+      "boat": "boat-canoe",
+      "lantern": "lantern-paper-amber"
+    },
+    "lastSavedAt": 1710000000000,
+    "fishing": {
+      "tools": ["tool-net"],
+      "bait": { "bait-none": 0, "bait-rice": 20 },
+      "fish": {},
+      "log": [],
+      "fishingXp": 0,
+      "equippedTool": "tool-net",
+      "equippedBait": "bait-rice"
+    }
+  }
+}
+```
+
+<ResponseField name="progress" type="object">
+  Full Harbor Quest state blob. All fields are sanitised server-side before storage and retrieval — unknown gear IDs, out-of-range values, and invalid cosmetic references are stripped.
+
+  <Expandable title="Key progress fields">
+    <ResponseField name="xp" type="number">Lifetime experience points. Used for leaderboard ranking. Capped at 50,000,000.</ResponseField>
+    <ResponseField name="gold" type="number">Lifetime arena gold from Match the Definition. Capped at 10,000,000.</ResponseField>
+    <ResponseField name="correctCount" type="number">Lifetime correct answers. Capped at 10,000,000.</ResponseField>
+    <ResponseField name="cleared" type="array">Array of cleared quest/pier IDs (max 200 unique entries).</ResponseField>
+    <ResponseField name="missionClears" type="object">Map of mission/pier ID → number of completions.</ResponseField>
+    <ResponseField name="coins" type="number">In-game shop currency. Capped at 1,000,000.</ResponseField>
+    <ResponseField name="owned" type="array">Gear IDs owned but not banked. All starter gear is always included.</ResponseField>
+    <ResponseField name="banked" type="array">Gear IDs stored in the bank (not in active inventory).</ResponseField>
+    <ResponseField name="look" type="object">Currently equipped gear slots: `hat`, `top`, `bottom`, `shoes`, `hand`, `boat`, `lantern`.</ResponseField>
+    <ResponseField name="fishing" type="object">Fishing mini-game state: tools, bait counts, fish caught, fishing XP.</ResponseField>
+    <ResponseField name="showoff" type="object">Showoff cosmetics: nametag, speech bubble, chair, pet, and emotes.</ResponseField>
+    <ResponseField name="rpg" type="object">HarborRPG sub-game state (max 2 characters). XP and gold here are soft — they do not inflate the pedagogy leaderboard.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### PUT /api/harbor-quest
+
+Saves the user's Harbor Quest progress and syncs the leaderboard row. The server sanitises the incoming blob, computes the correct-answer delta against the stored previous state, and increments `harbor_quest_count` in `usage_months` by the delta.
+
+**Auth required:** Yes.  
+**Rate limit:** 120 PUT requests per minute per user (configurable via `YUE_HARBOR_PUT_RL_PER_MIN`).
+
+### Request
+
+```json title="PUT /api/harbor-quest"
+{
+  "progress": {
+    "xp": 1500,
+    "gold": 400,
+    "correctCount": 52,
+    "cleared": ["quest-1", "quest-2", "quest-3"],
+    "…": "full progress blob"
+  }
+}
+```
+
+<ParamField body="progress" type="object" required>
+  Full Harbor Quest progress blob. The server sanitises all fields — unknown cosmetic IDs are dropped, numeric fields are clamped, and duplicate IDs in arrays are deduplicated. You should always send the complete state rather than a partial patch.
+</ParamField>
+
+### Response
+
+```json title="200 OK"
+{
+  "ok": true,
+  "progress": { "…": "sanitised progress as stored" }
+}
+```
+
+<Note>
+  The returned `progress` object is the **sanitised** version as written to the database. Clients should replace their local state with this response to stay consistent with server-side validation.
+</Note>
+
+### Usage metering
+
+Each PUT call diffs `progress.correctCount` against the previously stored value. If `correctCount` increased, the delta is written to `usage_months.harbor_quest_count` via `addHarborQuestCount`. This meter is admin view-only and does not gate any feature.
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `401`  | Not signed in |
+| `429`  | Rate limit exceeded (120 PUT/min) |
+| `500`  | Database error saving progress |
+| `503`  | Harbor Quest sync unavailable (database not configured) |
+
+---
+
+### POST /api/harbor-quest/gift
+
+Sends a cosmetic gift (lantern or title) to another signed-in user. Gifts transfer one item from the sender's inventory to the recipient. XP, gold, and correct-answer counts are never transferred.
+
+**Auth required:** Yes.  
+**Rate limit:** 30 gift requests per minute per user (configurable via `YUE_HARBOR_GIFT_RL_PER_MIN`).
+
+### Request
+
+```json title="POST /api/harbor-quest/gift"
+{
+  "toUserId": "uuid-of-recipient",
+  "kind": "lantern",
+  "itemId": "lantern-paper-crimson"
+}
+```
+
+<ParamField body="toUserId" type="string" required>
+  UUID of the recipient user. Cannot be the sender's own user ID.
+</ParamField>
+
+<ParamField body="kind" type="string" required>
+  Gift type. Accepted values: `"lantern"` or `"title"`.
+</ParamField>
+
+<ParamField body="itemId" type="string" required>
+  The specific gear or title ID to gift. Must be in the sender's `owned` array (or `ownedTitles` for titles) and must be a known game item.
+</ParamField>
+
+### Response
+
+```json title="200 OK"
+{
+  "ok": true,
+  "progress": { "…": "sender's updated progress" },
+  "householdMate": false,
+  "giverTitleAward": null,
+  "receiverTitleAward": "title-generous"
+}
+```
+
+<ResponseField name="householdMate" type="boolean">
+  `true` if the sender and recipient share a household. Household gifts may unlock special dockmate titles.
+</ResponseField>
+
+<ResponseField name="giverTitleAward" type="string | null">
+  Title ID unlocked by the sender as a reward for gifting, if any (e.g. `"title-generous"`).
+</ResponseField>
+
+<ResponseField name="receiverTitleAward" type="string | null">
+  Title ID unlocked by the recipient upon receiving the gift, if any.
+</ResponseField>
+
+---
+
+### GET /api/harbor-quest/leaderboard
+
+Returns the global Harbor Quest leaderboard ranked by XP (then gold, then correct count, then cleared count). No authentication required, but providing a Bearer token marks the caller's row with `isYou: true` and populates the `me` field even if the caller is outside the top N.
+
+### Query parameters
+
+<ParamField query="limit" type="number">
+  Number of entries to return. Default `25`, maximum `50`.
+</ParamField>
+
+### Response
+
+```json title="200 OK"
+{
+  "entries": [
+    {
+      "rank": 1,
+      "userId": "uuid",
+      "displayName": "HarborSailor",
+      "xp": 48200,
+      "gold": 3100,
+      "correctCount": 412,
+      "clearedCount": 18,
+      "isYou": true
+    }
+  ],
+  "me": {
+    "rank": 1,
+    "userId": "uuid",
+    "displayName": "HarborSailor",
+    "xp": 48200,
+    "gold": 3100,
+    "correctCount": 412,
+    "clearedCount": 18,
+    "isYou": true
+  },
+  "limit": 25
+}
+```
+
+<ResponseField name="entries" type="array">
+  Top `limit` leaderboard entries. Display names default to `Sailor-<4 chars of userId>` if no Account Hub username is set.
+</ResponseField>
+
+<ResponseField name="me" type="object | null">
+  The authenticated caller's leaderboard entry, including their rank even if they fall outside the top `limit`. `null` if no Bearer token was provided or the caller has no leaderboard row.
+</ResponseField>
+
+---
+
+## Practice Partner endpoints
+
+Practice Partner drills spoken Cantonese by generating AI-powered conversation scenarios. Scores are tracked on a separate leaderboard from Harbor Quest.
+
+### GET /api/practice-partner/leaderboard
+
+Returns the global Practice Partner leaderboard ranked by XP (then best streak, then total passes). No authentication required; providing a Bearer token marks the caller's row with `isYou: true`.
+
+**IP rate limit:** 180 GET requests per minute.
+
+### Response
+
+```json title="200 OK"
+{
+  "entries": [
+    {
+      "rank": 1,
+      "userId": "uuid",
+      "displayName": "LingLing",
+      "xp": 95000,
+      "bestStreak": 47,
+      "totalPasses": 320,
+      "isYou": false
+    }
+  ],
+  "me": null,
+  "limit": 25
+}
+```
+
+<ResponseField name="xp" type="number">Practice Partner experience points. Capped at 2,000,000.</ResponseField>
+<ResponseField name="bestStreak" type="number">Longest consecutive correct-answer streak. Capped at 10,000.</ResponseField>
+<ResponseField name="totalPasses" type="number">Total correct answers across all sessions. Capped at 1,000,000.</ResponseField>
+
+---
+
+### PUT /api/practice-partner/leaderboard
+
+Syncs the caller's Practice Partner score to the leaderboard. The server merges the incoming score **monotonically** — a later sync can only increase stored values, never decrease them. Display name is sourced from the Account Hub username (not from the request body).
+
+**Auth required:** Yes.  
+**Rate limit:** 60 PUT requests per minute per user.
+
+### Request
+
+```json title="PUT /api/practice-partner/leaderboard"
+{
+  "xp": 12500,
+  "bestStreak": 23,
+  "totalPasses": 180
+}
+```
+
+<ParamField body="xp" type="number" required>
+  Caller's current Practice Partner XP. Capped at 2,000,000.
+</ParamField>
+
+<ParamField body="bestStreak" type="number" required>
+  Longest consecutive correct-answer streak this user has achieved. Capped at 10,000.
+</ParamField>
+
+<ParamField body="totalPasses" type="number" required>
+  Total correct answers across all sessions. Capped at 1,000,000.
+</ParamField>
+
+### Response
+
+```json title="200 OK"
+{
+  "ok": true,
+  "score": {
+    "xp": 12500,
+    "bestStreak": 23,
+    "totalPasses": 180
+  }
+}
+```
+
+<ResponseField name="score" type="object">
+  The merged score as written to the leaderboard. Each field is the `max(incoming, stored)` value, so previously recorded high scores are never overwritten.
+</ResponseField>
+
+---
+
+## Practice Partner AI chat (admin only)
+
+Direct Practice Partner AI conversation testing is available at `POST /api/admin/practice-partner/chat`. This endpoint is restricted to admin accounts and is intended for scenario testing in the Stripe Dashboard or internal tooling — not for regular user interaction.
+
+Regular users access Practice Partner through the web app at the `#/practice` route inside Account Hub. The web client calls the same underlying AI service via the appropriate signed-in session.
+
+<Info>
+  Practice Partner AI is powered by the same OpenAI-compatible backend used for translations (`OPENAI_API_KEY`, `OPENAI_MODEL`). Drill categories include `"animals"`, `"foods"`, `"common"`, and `"expert"` Cantonese phrases.
+</Info>

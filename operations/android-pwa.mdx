@@ -1,0 +1,212 @@
+---
+title: "Package JyutTranslate as an Android TWA for Play Store"
+sidebarTitle: "Android PWA"
+description: "Package JyutTranslate as a Trusted Web Activity using PWA Builder to publish on Google Play, including digital asset links and keystore setup."
+---
+
+A Trusted Web Activity (TWA) is an Android shell that renders a Progressive Web App inside a full-screen Chrome Custom Tab with no browser chrome — the user gets a native-feeling app while the actual code stays on the web. JyutTranslate is already configured as a fully-featured PWA, so packaging it for the Play Store is largely a matter of running the URL through PWA Builder, setting up a Digital Asset Link to prove ownership, and uploading the resulting `.aab` to Play Console.
+
+## PWA Manifest Features
+
+The manifest is defined in `apps/web/pwa-manifest.ts` and is tuned specifically for TWA packaging and Play Store requirements. All features below are already in place — you do not need to edit the manifest for a standard Play Store release.
+
+<CardGroup cols={2}>
+  <Card title="Shortcuts" icon="bolt">
+    Four launcher shortcuts are defined:
+    - **Translate** → `#/app`
+    - **Camera** → `#/app?cam=1`
+    - **Conversation** → `#/app?mode=conversation`
+    - **Harbor Quest** → `#/learn`
+  </Card>
+  <Card title="Share Target" icon="share">
+    Accepts shared text, titles, and URLs from other Android apps via `GET` to the app root — automatically opens Solo translate with the shared content.
+  </Card>
+  <Card title="File Handlers" icon="file">
+    Registers JyutTranslate as a handler for images (`image/*`, including HEIC) and PDFs so "Open with" routes directly to Camera / Documents mode.
+  </Card>
+  <Card title="Launch Handler" icon="rocket">
+    `launch_handler.client_mode: "navigate-existing"` reuses an open window rather than spawning a new one when the app is launched from a shortcut.
+  </Card>
+  <Card title="Protocol Handlers" icon="link">
+    Registers the `web+jyuttranslate:` URI scheme so deep links from other apps open directly in the translator.
+  </Card>
+  <Card title="Maskable Icons" icon="image">
+    Provides `pwa-512-maskable.png` for Android adaptive icons and `pwa-512.png` / `pwa-192.png` for any-purpose use. `apple-touch-icon.png` (180×180) is also included.
+  </Card>
+  <Card title="Edge Side Panel" icon="sidebar">
+    `edge_side_panel.preferred_width: 480` enables the app as an Edge sidebar on Windows.
+  </Card>
+  <Card title="Manifest Metadata" icon="tag">
+    Stable `id`, `dir: "ltr"`, `orientation: "any"`, `categories: ["education", "utilities", "productivity"]`, and `prefer_related_applications: false` to keep the install banner active.
+  </Card>
+</CardGroup>
+
+### Manifest at a Glance
+
+```typescript title="apps/web/pwa-manifest.ts"
+{
+  name: 'JyutTranslate — AI Language Tool',
+  short_name: 'JyutTranslate',
+  theme_color: '#07131f',
+  background_color: '#07131f',
+  display: 'standalone',
+  start_url: '/#/app',
+  launch_handler: { client_mode: 'navigate-existing' },
+  edge_side_panel: { preferred_width: 480 },
+  protocol_handlers: [{ protocol: 'web+jyuttranslate', url: '/?q=%s' }],
+  share_target: { action: '/', method: 'GET', params: { text: 'text', url: 'url' } },
+  file_handlers: [{ action: '/', accept: { 'image/*': [...], 'application/pdf': ['.pdf'] } }],
+}
+```
+
+### Service Worker
+
+The service worker uses a Workbox offline shell. Its registration is **inlined in `index.html`** so that PWA Builder's HTML and Puppeteer scanners can discover `/sw.js` without needing to execute a separate JS bundle. Launch handling logic lives in `apps/web/src/lib/pwaLaunch.ts`.
+
+## Before You Run PWA Builder
+
+<Steps>
+  <Step title="Deploy to production">
+    Merge and deploy the current branch to Vercel so that `https://www.jyuttranslate.com` reflects your latest manifest, service worker, and asset links.
+  </Step>
+  <Step title="Confirm PWA Builder report">
+    Re-run PWA Builder on `https://www.jyuttranslate.com` and verify the score improves before proceeding to packaging.
+  </Step>
+  <Step title="(Optional) Regenerate icons and screenshots">
+    If you changed the app icon or want fresh Store screenshots, run locally:
+    ```bash
+    npm run icons                # regenerates pwa-512.png, pwa-512-maskable.png, pwa-192.png
+    npm run dev:web              # terminal 1 — must be running
+    npm run pwa:screenshots      # terminal 2 — requires Chrome
+    ```
+  </Step>
+</Steps>
+
+## PWA Builder Packaging Steps
+
+<Steps>
+  <Step title="Open PWA Builder">
+    Go to [pwabuilder.com](https://www.pwabuilder.com) and enter `https://www.jyuttranslate.com`.
+  </Step>
+  <Step title="Package for stores → Android">
+    Click **Package for stores** and select the **Android** option.
+  </Step>
+  <Step title="Apply suggested settings">
+    Use these values in the Android package form:
+
+    | Setting | Value |
+    |---------|-------|
+    | Package ID | `com.jyuttranslate.app` |
+    | Start URL | `https://www.jyuttranslate.com/#/app` |
+    | Theme colour | `#07131f` |
+    | Background colour | `#07131f` |
+  </Step>
+  <Step title="Download the zip">
+    The download contains an `.apk` for direct device install, an `.aab` for Play Console upload, and optional Android Studio source.
+  </Step>
+  <Step title="Back up the keystore">
+    Save the keystore file and both passwords (store password and key password) to a secure vault. Losing the keystore means you cannot publish updates to the same Play Store listing.
+  </Step>
+</Steps>
+
+## Digital Asset Links
+
+Digital Asset Links prove to Android that the website and the TWA package are owned by the same entity. Without a verified link, the TWA shows a browser address bar, defeating the purpose of a TWA.
+
+<Steps>
+  <Step title="Copy the SHA-256 fingerprint">
+    PWA Builder shows the fingerprint during the signing step. Alternatively, get it from **Play Console → App signing** after the first `.aab` upload (use the upload key fingerprint if Play App Signing re-signs your app).
+  </Step>
+  <Step title="Update assetlinks.json">
+    Replace the placeholder fingerprint in `apps/web/public/.well-known/assetlinks.json` with the value from step 1. Verify the file is live:
+    ```bash
+    curl -s https://www.jyuttranslate.com/.well-known/assetlinks.json
+    ```
+  </Step>
+  <Step title="Re-deploy and test">
+    Deploy the updated `assetlinks.json`. Install the `.apk` on an Android device — the absence of an address bar confirms the asset link is working.
+  </Step>
+</Steps>
+
+<Warning>
+  If Play App Signing re-signs the app, the fingerprint that matters is the **upload key** fingerprint shown in Play Console, not the local dev keystore fingerprint.
+</Warning>
+
+## Supabase Redirect URLs
+
+After packaging, confirm that the Supabase auth flow can return to the TWA correctly:
+
+1. **Site URL:** `https://www.jyuttranslate.com`
+2. **Redirect URLs** — add both:
+   - `https://www.jyuttranslate.com/**`
+   - `https://jyuttranslate.com/**` (if bare domain redirects)
+
+## Play Console Submission
+
+<Steps>
+  <Step title="Create a developer account">
+    A one-time $25 Google Play developer account fee is required.
+  </Step>
+  <Step title="Upload the AAB">
+    Upload the `.aab` to **Internal testing** first to validate signing and install flow before wider release.
+  </Step>
+  <Step title="Complete the store listing">
+    Add screenshots, a feature graphic, and a privacy policy URL: `https://www.jyuttranslate.com/privacy`.
+  </Step>
+  <Step title="Fill Data Safety">
+    Declare microphone and camera usage. Set **Delete account URL** to `https://www.jyuttranslate.com/delete-account`.
+  </Step>
+  <Step title="Complete Content Rating">
+    Submit the content rating questionnaire to receive an IARC rating.
+  </Step>
+  <Step title="(Post-publish) Add related_applications">
+    After the listing goes live, optionally add the Play Store ID to the manifest's `related_applications` array to surface the "Get it on Google Play" banner.
+  </Step>
+</Steps>
+
+## Target SDK Requirement
+
+Play requires `targetSdkVersion 36+` (enforced from 2026). If PWA Builder's `.aab` is rejected for a low target SDK:
+
+1. Download the **Android source** from the PWA Builder zip.
+2. Open the project in Android Studio.
+3. Set `targetSdkVersion 36` in `app/build.gradle`.
+4. Rebuild and sign the new `.aab`.
+
+## Device Testing Checklist
+
+Before submitting to Play Console, verify these scenarios on a physical Android device:
+
+<CardGroup cols={2}>
+  <Card title="TWA Display" icon="mobile">
+    App opens full-screen with no browser chrome and no address bar.
+  </Card>
+  <Card title="Translator Flow" icon="language">
+    Opening the app navigates directly to `#/app` and the live translator loads.
+  </Card>
+  <Card title="Share Target" icon="share-nodes">
+    Sharing text from another app via the system share sheet opens JyutTranslate and populates the translation input.
+  </Card>
+  <Card title="File Handler" icon="file-image">
+    Tapping "Open with JyutTranslate" on an image or PDF launches the Camera / Documents flow.
+  </Card>
+  <Card title="Authentication" icon="key">
+    Sign in via Google or email completes and returns to the app without a redirect loop.
+  </Card>
+  <Card title="Stripe Return" icon="credit-card">
+    Completing a Stripe upgrade returns to the app and the plan updates correctly.
+  </Card>
+</CardGroup>
+
+## Optional Features Not Required for Packaging
+
+The following PWA capabilities are available but intentionally deferred — they do not block a Play Store release:
+
+| Feature | Status |
+|---------|--------|
+| Native FCM push (TWA) | Web Push + VAPID already configured on the PWA; native FCM for TWA is still optional |
+| Background / periodic sync | Requires additional backend jobs |
+| Widgets | Windows-only adaptive cards |
+| Window Controls Overlay / Tabbed display | Desktop chrome features not used by the translator UI |
+| `iarc_rating_id` | Assigned automatically after completing the Play content rating questionnaire |
+| `scope_extensions` | Only needed if the TWA navigates to external domains |

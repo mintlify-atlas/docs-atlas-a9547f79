@@ -1,0 +1,153 @@
+---
+title: "Camera Translation: AR, Upload, and Documents"
+sidebarTitle: "Camera"
+description: "JyutTranslate's camera mode supports AR overlay translation, image upload with region detection, and document OCR using Azure AI Vision with an LLM fallback."
+---
+
+JyutTranslate's **Cam** tab opens a choice modal with three visual translation paths: **AR** (fullscreen live camera with tap-to-freeze OCR), **Upload** (still image with manual or auto-detected region boxes), and **Documents** (PDF, DOCX, PPTX, XLSX, and TXT with layout preserved). All three paths share the same Azure AI Vision OCR backend and the same Cantonese translation pipeline — they differ in how input is captured and how results are presented.
+
+## Prerequisites
+
+Camera OCR requires both `AZURE_VISION_KEY` and `AZURE_VISION_ENDPOINT` to be set (a Vision or multi-service resource — an Azure Speech key alone is not sufficient). When these are absent, the OCR engine falls back to `"demo"` and no text is extracted. Check the `/api/health` response:
+
+```json title="GET /api/health → engines"
+{
+  "engines": {
+    "azureVision": true,
+    "visionLlm": true
+  }
+}
+```
+
+## Language direction
+
+A toggle above the camera controls the translation direction for all three sub-modes:
+
+| Setting | Behaviour |
+|---------|-----------|
+| **Auto** | Detects script and translates toward English for Chinese input, toward 中文 for Latin input |
+| **To English** | Always translate OCR text into English |
+| **To 中文** | Always translate OCR text into Traditional Chinese |
+
+<Note>
+  Camera translation works between Latin script and Chinese (Traditional preferred for signs and menus). Speech Solo and Conversation modes remain English ↔ Cantonese (粵) only and are unaffected by this toggle.
+</Note>
+
+## AR mode
+
+AR mode gives you a fullscreen camera viewfinder. Point the camera at any text, tap the shutter, and JyutTranslate freezes the frame, runs OCR once, translates every detected region, and overlays the translations directly on the still image.
+
+<Steps>
+  <Step title="Open the viewfinder">
+    Tap **Cam** → select **AR**. The fullscreen camera preview opens. Use pinch or mouse-wheel to zoom; tap the viewfinder to focus when the browser exposes that control.
+  </Step>
+  <Step title="Tap the shutter">
+    The frame freezes. The shared *translating* animation plays while OCR and translation run in the background. No continuous polling occurs — OCR fires exactly once per shutter press.
+  </Step>
+  <Step title="View overlay panels">
+    Each detected text region receives an inline translation panel locked to that position on the still. Pinch-zoom or scroll on the frozen still to inspect small text.
+  </Step>
+  <Step title="Tap a region for details">
+    Tapping an overlay panel opens the full translation detail view with Jyutping ruby and alternative phrasings.
+  </Step>
+  <Step title="Clear or exit">
+    **Clear** returns to the live viewfinder. **X** exits to the Cam choice modal.
+  </Step>
+</Steps>
+
+## Upload mode
+
+Upload mode accepts a still photo from your gallery or file system. You can let the engine auto-detect text regions or draw your own bounding boxes before translating.
+
+<Steps>
+  <Step title="Select an image">
+    Tap **Upload**. The file picker opens (no `capture=` attribute — gallery and file browser both open on mobile). Select a photo.
+  </Step>
+  <Step title="Mark regions">
+    Draw bounding boxes around text you want translated, or tap **Auto-detect** to let Azure Vision find regions automatically. Drawn boxes can be repositioned until you translate.
+  </Step>
+  <Step title="Translate">
+    Tap **Translate** to process the selected region, or **Translate all** to process every detected region at once. Overlays lock to each region after translation.
+  </Step>
+  <Step title="Review results">
+    A scrollable Results list shows each region's original text and translation. Tapping a result entry highlights the corresponding overlay.
+  </Step>
+</Steps>
+
+## AI Vision LLM fallback
+
+When Azure Vision's Read API returns no text — common with stylised calligraphy, embossed foil lettering, or very low contrast — JyutTranslate automatically calls a multimodal LLM as a fallback.
+
+<Accordion title="AI Vision fallback details">
+  - **Model:** configured via `OPENAI_VISION_MODEL` (e.g. `deepseek-v4-flash-vision-exp` or `gpt-4o-mini`). Uses the same `OPENAI_API_KEY` and base URL unless `OPENAI_VISION_API_KEY` / `OPENAI_VISION_BASE_URL` overrides are set.
+  - **Metering:** each fallback invocation increments `ai_vision_count` against a hard monthly cap per plan (Free 200 / Family 2 000 / Business 10 000 by default).
+  - **Cap behaviour:** once the monthly AI Vision cap is reached, Azure Read still runs normally; only the LLM fallback step is skipped.
+  - **Health signal:** `engines.visionLlm: true` in `/api/health` means a vision-capable model is configured.
+</Accordion>
+
+## Documents sub-mode
+
+Documents translate PDFs and Office files with layout preserved. See the [Documents](/features/documents) page for the complete three-step PDF flow, OOXML rewrite details, plan limits, and API reference.
+
+Supported file types: **PDF**, **DOCX**, **PPTX**, **XLSX**, **TXT**
+
+<Card title="Document Translation" icon="file" href="/features/documents">
+  Full layout-preserving translation for PDFs and Office documents — OOXML rewrite in-place for Office files, rasterize + paint for PDFs.
+</Card>
+
+## Scan credit metering
+
+AR and Upload each consume one **scan credit** per successful `POST /api/camera/scan` call. Credits are checked before the call and charged on success. Documents use a separate page-based meter — they do **not** burn camera scan credits.
+
+| Plan | Camera Scans | Limit |
+|------|-------------|-------|
+| Guest | Yes | 30 scans (`YUE_GUEST_CAMERA_SCANS`) |
+| Free | Yes | 120 scans (`YUE_FREE_CAMERA_SCANS`) |
+| Family | Yes | 800 scans (`YUE_FAMILY_CAMERA_SCANS`) |
+| Business | Yes | Unlimited (still counted) |
+
+<Info>
+  Guests receive a metered trial of 30 AR / Upload scans. Once exhausted, a sign-in prompt appears. The Documents sub-mode is greyed out for guests — sign-in is required regardless of scan credit balance.
+</Info>
+
+### Heartbeat endpoint
+
+While the AR viewfinder or Upload editor is open, the app posts a heartbeat to log session duration for admin analytics. This does **not** gate camera access or consume scan credits.
+
+```
+POST /api/usage/camera-heartbeat
+Body: { "seconds": <number 0–120> }
+Gate: allowed.camera (logging only)
+```
+
+### `forDocs` flag
+
+When the Documents hybrid flow calls `/api/camera/scan` for PDF page OCR, it passes `forDocs: true`. This flag routes the request through the `allowed.docs` gate instead of `allowed.camera` and does **not** charge a camera scan credit. A single docs page is billed instead.
+
+## API endpoint
+
+```
+POST /api/camera/scan
+Gate: allowed.camera  (allowed.docs when forDocs: true)
+Body: {
+  image: "<base64 or data URL>",
+  boxes?: [{ x, y, w, h }, ...],
+  target?: "en" | "zh",
+  ocrOnly?: boolean,
+  forDocs?: boolean
+}
+```
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AZURE_VISION_KEY` | — | Azure AI Vision subscription key (required for OCR) |
+| `AZURE_VISION_ENDPOINT` | — | Azure AI Vision endpoint URL (required for OCR) |
+| `OPENAI_VISION_MODEL` | — | Model ID for AI Vision LLM fallback |
+| `OPENAI_VISION_API_KEY` | Inherits from `OPENAI_API_KEY` | Override key for vision LLM |
+| `OPENAI_VISION_BASE_URL` | Inherits from `OPENAI_BASE_URL` | Override base URL for vision LLM |
+| `YUE_GUEST_CAMERA_SCANS` | 30 | Guest scan credit cap |
+| `YUE_FREE_CAMERA_SCANS` | 120 | Free plan scan credit cap |
+| `YUE_FAMILY_CAMERA_SCANS` | 800 | Family plan scan credit cap |
+| `YUE_FREE_ALLOW_CAMERA` | 1 | Set to `0` to disable camera for Free plan |

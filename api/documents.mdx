@@ -1,0 +1,292 @@
+---
+title: "Document Translation API: PDF, DOCX, PPTX, XLSX"
+sidebarTitle: "Documents"
+description: "POST /api/docs/translate handles Office and text files. PDF translation uses a two-step flow: POST /api/docs/segments then POST /api/docs/commit after client rendering."
+---
+
+JyutTranslate's Documents feature translates Office files (DOCX, PPTX, XLSX), plain text (TXT), and PDFs while preserving the original layout. Office and TXT files are handled server-side in a single round-trip via `POST /api/docs/translate`, which rewrites OOXML paragraph text in place and returns a base64-encoded translated file. PDFs use a two-phase client-driven flow: the browser extracts the text layer and sends it to `POST /api/docs/segments` in batches, then calls `POST /api/docs/commit` after the full job succeeds to finalize billing. All three endpoints require the `allowed.docs` entitlement gate, which requires sign-in — guests cannot access Documents.
+
+---
+
+## POST /api/docs/translate
+
+Translates an Office or TXT file and returns the translated file as base64. Paragraph-level text is rewritten in place; structure, images, charts, and formatting are preserved. Billing (`docs_pages`) is applied only on success, never on errors.
+
+The server performs a pre-flight page estimate (`peekDocPages`) before calling the translate engine. If the estimated page count exceeds the caller's remaining `docsPages` quota, the request is rejected with HTTP 402 before any translation work begins.
+
+<Note>
+  PDF files are not handled by this endpoint. The server returns HTTP 500 with the message `"PDF uses the hybrid client path (layout render + text/vision). Send pages from the Documents UI."` — use `/api/docs/segments` + `/api/docs/commit` instead.
+</Note>
+
+<Warning>
+  The JSON body limit for this endpoint is 12 MB. Base64-encoded files are ~1.33× larger than the source binary, so the effective maximum file size is approximately **8 MB** binary — enforced explicitly in the handler.
+</Warning>
+
+### Request
+
+```http
+POST /api/docs/translate
+Content-Type: application/json
+```
+
+<ParamField body="filename" type="string" required>
+  Original filename including extension. Used to determine the file type (`docx`, `pptx`, `xlsx`, `txt`, `md`, `csv`). Maximum 240 characters.
+</ParamField>
+
+<ParamField body="data" type="string" required>
+  The file as a data URL (`data:application/..;base64,...`) or raw base64 string. Maximum approximately 8 MB binary after decoding.
+</ParamField>
+
+<ParamField body="from" type="string" default="en">
+  Source language. Full set: `en`, `yue`, `cmn`, `wuu`, `sichuan`, `tl`, `es`, `eses`, `vi`, `th`, `lo`, `ko`, `ja`, `id`, `ms`, `pt`, `fr`, `hi`, `km`, `my`, `jv`, `it`, `de`, `nl`, `ar`, `arsa`, `ceb`, `ilo`, `bcl`. Must differ from `to`.
+</ParamField>
+
+<ParamField body="to" type="string" default="yue">
+  Target language. Same set as `from`. Must differ from `from`.
+</ParamField>
+
+### Response
+
+<ResponseField name="filename" type="string" required>
+  Output filename incorporating the target language code (e.g. `report.yue.docx`).
+</ResponseField>
+
+<ResponseField name="mime" type="string" required>
+  MIME type for the output file, e.g. `application/vnd.openxmlformats-officedocument.wordprocessingml.document`.
+</ResponseField>
+
+<ResponseField name="dataBase64" type="string" required>
+  The translated file as raw base64. Decode and save with the provided `filename` and `mime` type.
+</ResponseField>
+
+<ResponseField name="engine" type='"txt" | "docx" | "pptx" | "xlsx"' required>
+  Which sub-engine processed the file.
+</ResponseField>
+
+<ResponseField name="segments" type="number" required>
+  Number of text segments (paragraphs) translated.
+</ResponseField>
+
+<ResponseField name="pages" type="number" required>
+  Billable page count deducted from the caller's `docsPages` quota.
+</ResponseField>
+
+<ResponseField name="entitlement" type="object" required>
+  Updated entitlement snapshot reflecting the page debit.
+</ResponseField>
+
+### Example
+
+```bash
+curl https://api.jyuttranslate.com/api/docs/translate \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<supabase-jwt>" \
+  -d '{
+    "filename": "welcome.docx",
+    "data": "UEsDBBQABgAIAAAAIQ...",
+    "from": "en",
+    "to": "yue"
+  }'
+```
+
+```json title="200 Response"
+{
+  "filename": "welcome.yue.docx",
+  "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "dataBase64": "UEsDBBQABgAIAAAAIQ...",
+  "engine": "docx",
+  "segments": 12,
+  "pages": 2,
+  "entitlement": { "...": "see health & entitlement" }
+}
+```
+
+---
+
+## POST /api/docs/segments
+
+The first step of the **PDF hybrid translation flow**. The browser extracts the PDF text layer (using a client-side PDF.js renderer), then sends batches of text segments to this endpoint for translation. The server translates them and returns the translated strings aligned to the input order.
+
+The server estimates billable pages from total character count (approximately 1 800 characters per page, minimum 1) and debits `docs_pages` immediately. This prepaid debit is later reconciled by `POST /api/docs/commit`.
+
+<Info>
+  Unlike `POST /api/docs/translate`, this endpoint accepts raw text strings — not base64 file data. The PDF rendering and layout painting happen entirely client-side; this endpoint only handles the translation of extracted text.
+</Info>
+
+### Request
+
+```http
+POST /api/docs/segments
+Content-Type: application/json
+```
+
+<ParamField body="segments" type="string[]" required>
+  Array of 1–400 text strings extracted from the PDF (one per paragraph or text block). Each string must be at most 4 000 characters. The response `translations` array is aligned 1-to-1 with this input.
+</ParamField>
+
+<ParamField body="from" type="string" default="en">
+  Source language. Same set as `/api/docs/translate`.
+</ParamField>
+
+<ParamField body="to" type="string" default="yue">
+  Target language. Same set as `/api/docs/translate`.
+</ParamField>
+
+### Response
+
+<ResponseField name="translations" type="string[]" required>
+  Translated strings, one per input segment, in the same order. If `from === to`, the originals are returned unchanged.
+</ResponseField>
+
+<ResponseField name="from" type="string" required>
+  The resolved source language code.
+</ResponseField>
+
+<ResponseField name="to" type="string" required>
+  The resolved target language code.
+</ResponseField>
+
+<ResponseField name="pagesBilled" type="number" required>
+  Pages debited from `docs_pages` during this call (estimated from total character count). `0` in open mode.
+</ResponseField>
+
+<ResponseField name="entitlement" type="object" required>
+  Updated entitlement snapshot.
+</ResponseField>
+
+### Example
+
+```bash
+curl https://api.jyuttranslate.com/api/docs/segments \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<supabase-jwt>" \
+  -d '{
+    "segments": [
+      "Welcome to JyutTranslate.",
+      "This document has been automatically translated.",
+      "Please verify critical content with a human translator."
+    ],
+    "from": "en",
+    "to": "yue"
+  }'
+```
+
+```json title="200 Response"
+{
+  "translations": [
+    "歡迎使用JyutTranslate。",
+    "此文件已自動翻譯。",
+    "請讓人工翻譯員核實重要內容。"
+  ],
+  "from": "en",
+  "to": "yue",
+  "pagesBilled": 1,
+  "entitlement": { "...": "see health & entitlement" }
+}
+```
+
+---
+
+## POST /api/docs/commit
+
+The final step of the **PDF hybrid flow**. After the client has successfully rendered all translated pages, it calls this endpoint to finalize billing. The server calculates the remaining unbilled pages (`pages - prepaidPages`) and charges them from the caller's `docsPages` quota.
+
+This design means that **abandoned or failed PDF jobs are never double-billed**: if the client crashes mid-render, only the pages already pre-billed via `/api/docs/segments` are charged. The client should only call `/api/docs/commit` after the full job succeeds.
+
+Requires sign-in (`loggedIn: true`). Guests cannot access this endpoint.
+
+### Request
+
+```http
+POST /api/docs/commit
+Content-Type: application/json
+```
+
+<ParamField body="pages" type="number" required>
+  Total number of PDF pages in the completed job. Clamped to `[1, 500]`. Must be a positive integer.
+</ParamField>
+
+<ParamField body="prepaidPages" type="number" required>
+  Pages already billed during the job's `/api/docs/segments` calls. Clamped to `[0, pages]`. The server bills `max(0, pages - prepaidPages)` additional pages.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="pages" type="number" required>
+  The total page count from the request.
+</ResponseField>
+
+<ResponseField name="prepaidPages" type="number" required>
+  The prepaid page count from the request (after clamping).
+</ResponseField>
+
+<ResponseField name="pagesBilled" type="number" required>
+  Additional pages charged during this commit (`pages - prepaidPages`). `0` in open mode.
+</ResponseField>
+
+<ResponseField name="entitlement" type="object" required>
+  Updated entitlement snapshot reflecting the final debit.
+</ResponseField>
+
+### Example
+
+```bash
+curl https://api.jyuttranslate.com/api/docs/commit \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<supabase-jwt>" \
+  -d '{"pages": 5, "prepaidPages": 3}'
+```
+
+```json title="200 Response"
+{
+  "ok": true,
+  "pages": 5,
+  "prepaidPages": 3,
+  "pagesBilled": 2,
+  "entitlement": { "...": "see health & entitlement" }
+}
+```
+
+---
+
+## PDF Two-Phase Flow
+
+PDF translation uses a client-rendered hybrid approach because the server cannot perform layout-preserving PDF manipulation purely server-side. The flow works as follows:
+
+<Steps>
+  <Step title="Client extracts text">
+    The browser uses PDF.js to extract the text layer from the uploaded PDF, producing an array of `{ text, pageNum }` objects — one per paragraph or text block. Scanned pages (no text layer) are rasterized and sent to `POST /api/camera/scan` with `forDocs: true` instead.
+  </Step>
+  <Step title="Translate segments">
+    The extracted text segments are sent in batches to `POST /api/docs/segments`. The server translates each segment and returns aligned translations. Pages are pre-billed at this point (estimated from character count). The client accumulates `pagesBilled` across all segment calls as `prepaidPages`.
+  </Step>
+  <Step title="Client renders translated PDF">
+    The browser paints the translated text onto rasterized PDF pages using the source positions and font sizes from the original text layer. This step happens entirely client-side.
+  </Step>
+  <Step title="Commit billing">
+    After the full render succeeds, the client calls `POST /api/docs/commit` with `pages` (total PDF pages) and `prepaidPages` (sum of `pagesBilled` from all segment calls). The server bills only the unbilled remainder, ensuring no double-billing.
+  </Step>
+</Steps>
+
+<Tip>
+  This deferred billing model means that if a user closes the tab or the render fails mid-way, only the segment batches that were already translated are charged. The commit step is idempotent-safe — if the client retries with the same `pages` and `prepaidPages`, no additional charges occur beyond the remaining delta.
+</Tip>
+
+---
+
+## Documents Error Responses
+
+| Status | Reason |
+|--------|--------|
+| `401` | Not signed in (`loggedIn: false`) — Documents requires sign-in |
+| `402` | `allowed.docs` is `false`, or insufficient remaining `docsPages` quota |
+| `400` | Validation failure — `from === to`, malformed base64, or `pages` is not a positive integer |
+| `413` | File exceeds 8 MB binary limit |
+| `500` | Unsupported file type or internal translation error |

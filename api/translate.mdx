@@ -1,0 +1,341 @@
+---
+title: "POST /api/translate, /api/breakdown, /api/details/enrich"
+sidebarTitle: "Translate"
+description: "POST /api/translate translates between Cantonese and English. /api/breakdown returns per-character Jyutping and gloss. /api/details/enrich enriches a single character."
+---
+
+JyutTranslate exposes three text-intelligence endpoints that compose the Solo translation experience. `POST /api/translate` handles the primary bidirectional translation between Cantonese and English (plus 25+ additional languages). `POST /api/breakdown` decomposes a phrase into per-character or per-word segments with Jyutping romanization and English glosses. `POST /api/details/enrich` fetches a unified dictionary entry for a single lemma, combining offline lexicon data with AI-synthesized senses and example phrases. All three require the `allowed.textTranslate` entitlement gate.
+
+---
+
+## POST /api/translate
+
+Translates text between Cantonese (`yue`) and English (`en`), as well as Mandarin, Tagalog, Spanish, Vietnamese, Thai, and 20+ other target languages. The engine pipeline checks the bundled phrase-memory dictionary first (returning `engine: "dictionary"` on a hit), then falls back to the configured OpenAI-compatible LLM. In demo mode (no API key), the response text carries a `（示範）` prefix.
+
+Each successful call increments `translate_count` usage for the requesting user or guest.
+
+<Note>
+  The request body is validated with Zod. `text` must be between 1 and 2 000 characters. Requests exceeding the limit receive HTTP 400.
+</Note>
+
+### Request
+
+```http
+POST /api/translate
+Content-Type: application/json
+```
+
+<ParamField body="text" type="string" required>
+  The source text to translate. Maximum 2 000 characters.
+</ParamField>
+
+<ParamField body="from" type="string" default="en">
+  Source language code. One of: `en`, `yue`, `cmn`, `wuu`, `sichuan`, `tl`, `es`, `eses`, `vi`, `th`, `lo`, `ko`, `ja`, `id`, `ms`, `pt`, `fr`, `hi`, `km`, `my`, `jv`, `it`, `de`, `nl`, `ar`, `arsa`, `ceb`, `ilo`, `bcl`.
+</ParamField>
+
+<ParamField body="to" type="string" required>
+  Target language code. Same set as `from`.
+</ParamField>
+
+<ParamField body="includeAlternatives" type="boolean" default="false">
+  When `true`, the response includes colloquial alternative phrasings for EN↔Cantonese/Mandarin pairs.
+</ParamField>
+
+<ParamField body="register" type='"colloquial" | "formal"'>
+  Force a speech register for applicable language pairs (e.g. Mexican Spanish). When omitted, the register is inferred from the source text.
+</ParamField>
+
+### Response
+
+<ResponseField name="text" type="string" required>
+  The translated output string. Empty when the engine could not produce a valid translation.
+</ResponseField>
+
+<ResponseField name="definition" type="string">
+  A short learner-friendly gloss in the target language (e.g. English sense for a Cantonese output).
+</ResponseField>
+
+<ResponseField name="alternatives" type="string[]">
+  Colloquial alternative phrasings, present when `includeAlternatives: true` and the LLM returns variants.
+</ResponseField>
+
+<ResponseField name="engine" type="string" required>
+  Which translation engine produced the result. Values: `"dictionary"` (phrase-memory hit), `"lexicon"` (CC-Canto lexicon), `"openai"` (official OpenAI), `"openai-compatible"` (custom base URL provider), or `"demo"` (no API key).
+</ResponseField>
+
+<ResponseField name="from" type="string" required>
+  The source language code that was used.
+</ResponseField>
+
+<ResponseField name="to" type="string" required>
+  The target language code that was used.
+</ResponseField>
+
+<ResponseField name="definitions" type="string[]">
+  Merged learner senses from the lexicon and the LLM, deduplicated.
+</ResponseField>
+
+<ResponseField name="meta" type="object">
+  Debug metadata including `dictionaryHit`, `scrubbed`, `colloquialScore`, `rewritten`, and `notes` (engine pipeline annotations).
+</ResponseField>
+
+### Examples
+
+<Tabs>
+  <Tab title="English → Cantonese">
+    ```bash
+    curl https://api.jyuttranslate.com/api/translate \
+      -X POST \
+      -H "Content-Type: application/json" \
+      -d '{"text":"How are you?","from":"en","to":"yue"}'
+    ```
+
+    ```json title="200 Response"
+    {
+      "text": "你好嗎？",
+      "definition": "How are you?",
+      "alternatives": [],
+      "engine": "dictionary",
+      "from": "en",
+      "to": "yue",
+      "definitions": ["How are you?"],
+      "meta": { "dictionaryHit": true, "scrubbed": false, "colloquialScore": 0, "rewritten": false, "notes": [] }
+    }
+    ```
+  </Tab>
+  <Tab title="Cantonese → English">
+    ```bash
+    curl https://api.jyuttranslate.com/api/translate \
+      -X POST \
+      -H "Content-Type: application/json" \
+      -d '{"text":"我唔知","from":"yue","to":"en"}'
+    ```
+
+    ```json title="200 Response"
+    {
+      "text": "I don't know",
+      "definition": "",
+      "alternatives": [],
+      "engine": "openai",
+      "from": "yue",
+      "to": "en",
+      "definitions": [],
+      "meta": { "dictionaryHit": false, "scrubbed": false, "colloquialScore": 0, "rewritten": false, "notes": [] }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/breakdown
+
+Decomposes a Cantonese phrase (or English, Thai, Vietnamese, and other supported languages) into per-character or per-word segments. Each segment includes the source token, its Jyutping romanization (for Cantonese), and a short English gloss in context. Requires `allowed.textTranslate`. Each successful call increments `translate_count` usage (same as `/api/translate`).
+
+<Note>
+  Language is auto-detected from script when `lang` is omitted — Han characters resolve to `yue`; Latin script resolves to `en`. Pass an explicit `lang` for disambiguation (e.g. Mandarin text that should use Mandarin glosses rather than Cantonese).
+</Note>
+
+### Request
+
+```http
+POST /api/breakdown
+Content-Type: application/json
+```
+
+<ParamField body="text" type="string" required>
+  The phrase to decompose. Maximum 500 characters.
+</ParamField>
+
+<ParamField body="lang" type="string">
+  Optional explicit language code. Same set as `/api/translate`. When omitted, auto-detected from script.
+</ParamField>
+
+### Response
+
+<ResponseField name="characters" type="array" required>
+  Array of character or word segment objects.
+  <Expandable title="segment fields">
+    <ResponseField name="characters[].char" type="string">
+      The character or token (single Han character, Latin word, or punctuation).
+    </ResponseField>
+    <ResponseField name="characters[].jyutping" type="string | null">
+      Jyutping with tone number for Cantonese (e.g. `"nei5"`). IPA for English. `null` for punctuation or when unknown.
+    </ResponseField>
+    <ResponseField name="characters[].meaning" type="string">
+      Short contextual English gloss for this segment in this phrase.
+    </ResponseField>
+    <ResponseField name="characters[].glossSource" type="string">
+      Provenance tag: `"cc-canto"`, `"seed"`, `"lexicon"`, `"model"`, etc.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="engine" type='"dictionary" | "openai"' required>
+  `"openai"` when the LLM was used to enrich glosses; `"dictionary"` when the API key is absent.
+</ResponseField>
+
+<ResponseField name="lang" type="string" required>
+  The detected or provided language code.
+</ResponseField>
+
+### Example
+
+```bash
+curl https://api.jyuttranslate.com/api/breakdown \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"text":"你好嗎"}'
+```
+
+```json title="200 Response"
+{
+  "characters": [
+    { "char": "你", "jyutping": "nei5", "meaning": "you", "glossSource": "cc-canto" },
+    { "char": "好", "jyutping": "hou2", "meaning": "good / well", "glossSource": "cc-canto" },
+    { "char": "嗎", "jyutping": "maa3", "meaning": "question particle", "glossSource": "model" }
+  ],
+  "engine": "openai",
+  "lang": "yue"
+}
+```
+
+---
+
+## POST /api/details/enrich
+
+Returns a unified dictionary entry for a single lemma. The entry combines offline lexicon data (CC-Canto) with AI-synthesized senses, example phrases, usage notes, and optional illustrative media (emoji + Wikipedia thumbnail). Requires `allowed.textTranslate`. Usage is incremented only when the LLM was invoked (`engine !== "offline"`).
+
+The `glossLang` field controls the language in which senses, examples, and usage notes are written — it defaults to the lemma language. For example, a Cantonese lemma with `glossLang: "en"` will produce English-language senses.
+
+### Request
+
+```http
+POST /api/details/enrich
+Content-Type: application/json
+```
+
+<ParamField body="text" type="string" required>
+  The lemma to look up. Maximum 500 characters.
+</ParamField>
+
+<ParamField body="lang" type="string" required>
+  Language of the lemma. Same set as `/api/translate`.
+</ParamField>
+
+<ParamField body="contextText" type="string">
+  Optional paired-pane text (the source or translation) used for sense disambiguation. Never echoed into the output senses.
+</ParamField>
+
+<ParamField body="contextLang" type="string">
+  Language of `contextText`.
+</ParamField>
+
+<ParamField body="glossLang" type="string">
+  Language in which to write senses, examples, and usage notes. Defaults to the lemma language. Corresponds to the Account Hub primary language setting.
+</ParamField>
+
+<ParamField body="wantMedia" type="boolean" default="true">
+  When `true`, the response may include an emoji and a keyless Wikipedia thumbnail for the lemma.
+</ParamField>
+
+### Response
+
+The response is wrapped as `{ "entry": { ... } }`.
+
+<ResponseField name="entry.lemma" type="string" required>
+  The resolved input lemma.
+</ResponseField>
+
+<ResponseField name="entry.lang" type="string" required>
+  The lemma's language code.
+</ResponseField>
+
+<ResponseField name="entry.glossLang" type="string">
+  The language used for senses and examples.
+</ResponseField>
+
+<ResponseField name="entry.pronunciation" type="string">
+  Romanization or IPA for the lemma. Empty for Cantonese (the client renders LSHK Jyutping with Chao tone letters directly).
+</ResponseField>
+
+<ResponseField name="entry.senses" type="array">
+  Array of `{ gloss, pos?, note? }` objects. Up to 6 senses, blending offline and AI sources.
+</ResponseField>
+
+<ResponseField name="entry.examples" type="array">
+  Array of `{ text, translation?, note? }` example phrases. Up to 4 examples.
+</ResponseField>
+
+<ResponseField name="entry.usageNotes" type="string[]">
+  Short usage notes (register, formality, regional variation). Up to 4 notes.
+</ResponseField>
+
+<ResponseField name="entry.media" type="array">
+  Illustrative media items. Each item has a `type` (`"emoji"` or `"image"`), a `src`, and optional `alt` text.
+</ResponseField>
+
+<ResponseField name="entry.provenance" type="string[]">
+  Source tags: `"lexicon"`, `"ai-synthesis"`, `"wikipedia"`, `"emoji"`.
+</ResponseField>
+
+<ResponseField name="entry.engine" type='"offline" | "openai" | "mixed"' required>
+  `"offline"` when no LLM call was made; `"openai"` when AI synthesis was used; `"mixed"` when both offline lexicon and AI sources contributed.
+</ResponseField>
+
+### Example
+
+```bash
+curl https://api.jyuttranslate.com/api/details/enrich \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"text":"係","lang":"yue","glossLang":"en"}'
+```
+
+```json title="200 Response"
+{
+  "entry": {
+    "lemma": "係",
+    "lang": "yue",
+    "glossLang": "en",
+    "pronunciation": "",
+    "senses": [
+      { "gloss": "to be (copula)", "pos": "verb", "note": "Colloquial Cantonese; replaces 是 in spoken 粵語" }
+    ],
+    "examples": [
+      { "text": "係呀", "translation": "Yes, that's right.", "note": "Affirmative response" }
+    ],
+    "usageNotes": ["Distinctly Cantonese; do not use in written Mandarin"],
+    "media": [{ "type": "emoji", "src": "✅", "alt": "check mark" }],
+    "provenance": ["ai-synthesis", "emoji"],
+    "engine": "openai"
+  }
+}
+```
+
+---
+
+## Error Responses
+
+All three endpoints share a common error envelope.
+
+<Tabs>
+  <Tab title="401 Unauthorized">
+    ```json
+    { "message": "Please log in to use translation.", "entitlement": { "...": "..." } }
+    ```
+    Returned when `allowed.textTranslate` is `false` and `reason` is `"login_required"`.
+  </Tab>
+  <Tab title="402 Payment Required">
+    ```json
+    { "message": "Translation not allowed on your plan.", "entitlement": { "...": "..." } }
+    ```
+    Returned when quota is exhausted or the feature is not available on the caller's plan.
+  </Tab>
+  <Tab title="400 Bad Request">
+    ```json
+    { "message": "text too long (max 2000 characters)" }
+    ```
+    Returned for schema validation failures.
+  </Tab>
+</Tabs>

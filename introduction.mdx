@@ -1,0 +1,84 @@
+---
+title: "JyutTranslate: Cantonese/English Speech Translator"
+sidebarTitle: "Introduction"
+description: "JyutTranslate translates between Cantonese and English in real time via microphone, camera AR, and documents, powered by Azure Speech and DeepSeek."
+---
+
+JyutTranslate is a Progressive Web App (PWA) that translates between English and Cantonese in real time. It combines Azure Cognitive Services for speech recognition and synthesis, Azure Vision for camera-based OCR, and an OpenAI-compatible large language model — such as DeepSeek — tuned for colloquial 粵語. The app is deployed on Vercel with freemium entitlements managed through Supabase and Stripe, so everyone can start translating immediately without a sign-in, and upgrade for higher limits when they need them.
+
+## Translation Modes
+
+JyutTranslate offers three distinct translation modes, each designed for a different real-world scenario.
+
+<CardGroup cols={3}>
+  <Card title="Solo" icon="microphone">
+    One-way live speech translation. Speak into the mic, watch the STT preview accumulate, then receive a single polished Cantonese or English translation when you stop talking.
+  </Card>
+  <Card title="Conversation" icon="comments">
+    Two-way turn-taking translation for face-to-face conversations. Each speaker's utterance is translated into the other language, so both sides can follow along in their own language.
+  </Card>
+  <Card title="Cam" icon="camera">
+    Camera-powered translation with three sub-modes: **AR** (point, shoot, instant overlay), **Upload** (draw or detect bounding boxes on gallery images), and **Documents** (PDF, Office, and plain-text files translated with layout preserved).
+  </Card>
+</CardGroup>
+
+## Technology Stack
+
+JyutTranslate is built from production-grade cloud services and a modern JavaScript monorepo.
+
+| Layer | Technology |
+|---|---|
+| Speech STT / TTS | Azure Cognitive Services Speech (`zh-HK` locale) |
+| Camera OCR | Azure Computer Vision (multi-service resource) |
+| Translation LLM | OpenAI-compatible API — DeepSeek, Ollama, or any `gpt-4o-mini`-compatible endpoint |
+| Jyutping romanisation | [`to-jyutping`](https://github.com/CanCLID/to-jyutping) + LSHK scheme |
+| Auth & database | Supabase (Postgres + Row-Level Security) |
+| Payments | Stripe Checkout with promotion code support |
+| Hosting | Vercel (web PWA + serverless API proxy) |
+| Frontend | React 19 + Vite 8, Zustand, Framer Motion, Three.js |
+| Backend | Express 4, TypeScript, `tsx` |
+
+## Freemium Plans
+
+JyutTranslate uses a tiered entitlement model. Core features are free for every visitor; higher-volume usage and premium features require a paid plan.
+
+<Tabs>
+  <Tab title="Guest (no sign-in)">
+    Guests can use Solo text translation, Jyutping lookup, and tap-to-play TTS voice immediately without creating an account. Guests also receive a metered trial of **30 minutes** of live mic translation and **30 Cam AR / Upload scans**. Document translation requires sign-in.
+  </Tab>
+  <Tab title="Free (signed in)">
+    Free accounts extend the monthly live mic allowance and raise the Cam scan quota. TTS playback is available up to a hard character cap (`YUE_FREE_TTS_CHARS`). Auto-speak and unlimited TTS are reserved for paid plans.
+  </Tab>
+  <Tab title="Family">
+    The Family plan raises live mic minutes to **480 per month**, Cam scans to **800**, and Document pages to **400**. TTS is unlimited (usage tracked). Auto-speak is enabled.
+  </Tab>
+  <Tab title="Business">
+    The Business plan provides **2,400 live mic minutes** per month, **unlimited TTS**, higher AI Vision quotas, and the full Document translation allowance. Suitable for professional or team use.
+  </Tab>
+</Tabs>
+
+<Note>
+  All Stripe Checkout sessions support **promotion codes** — create a Promotion Code (not just a coupon) in the Stripe Dashboard to distribute discounts.
+</Note>
+
+## Core Features
+
+<CardGroup cols={3}>
+  <Card title="Translation Modes" icon="language" href="/features/translation-modes">
+    Deep dive into Solo and Conversation live speech modes, STT pipeline behaviour, and how translations are displayed.
+  </Card>
+  <Card title="Camera Translation" icon="camera" href="/features/camera">
+    Learn how Cam AR, Upload bounding-box detection, and Document translation work end to end with Azure Vision OCR.
+  </Card>
+  <Card title="Jyutping" icon="book-open" href="/features/jyutping">
+    Understand how JyutTranslate generates LSHK Jyutping romanisation alongside every Cantonese translation.
+  </Card>
+</CardGroup>
+
+## Next Step
+
+Ready to run JyutTranslate locally? The quickstart guide gets you from a fresh clone to live translation output in under five minutes.
+
+<Card title="Quickstart →" icon="rocket" href="/quickstart">
+  Clone the repo, add one API key, and start translating.
+</Card>

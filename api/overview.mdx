@@ -1,0 +1,282 @@
+---
+title: "JyutTranslate REST API: Endpoints and Conventions"
+sidebarTitle: "Overview"
+description: "Complete index of JyutTranslate's REST API endpoints, base URLs, response format, and error handling conventions for the Express proxy server."
+---
+
+JyutTranslate's backend is an Express server that acts as a secure proxy between the React/Vite PWA and upstream services — Azure Speech, Azure AI Vision, OpenAI-compatible LLMs, Supabase, and Stripe. Every route is mounted under the `/api/` prefix and returns JSON unless otherwise noted. Guest and signed-in requests both flow through the same endpoints; entitlement resolution inside each handler decides what is permitted.
+
+## Base URLs
+
+The API listens on port `8787` by default (configurable via `PORT`). Two URLs are relevant depending on your context.
+
+| Environment | Base URL |
+|---|---|
+| Local development | `http://localhost:8787` |
+| Production | `https://www.jyuttranslate.com` |
+
+All requests from the PWA use relative paths via the same origin in production, or are proxied through Vite's dev server locally. When integrating directly, prefix every path below with the appropriate base URL.
+
+<Note>
+  The production canonical URL is `https://www.jyuttranslate.com`. The apex domain `jyuttranslate.com` redirects to `www` via Vercel's `vercel.json` routing configuration.
+</Note>
+
+## Content-Type
+
+All routes accept and return `application/json`. The single exception is `POST /api/billing/webhook`, which must receive the **raw request body** so Stripe's signature verification can succeed — Express applies `express.raw({ type: 'application/json' })` to that route before any JSON parsing.
+
+Camera, document, and segment routes (`POST /api/camera/scan`, `POST /api/docs/translate`, `POST /api/docs/segments`, `POST /api/docs/commit`) use a **12 MB** JSON body limit to accommodate base64-encoded images and file content. All other routes cap at **256 KB**.
+
+The TTS route (`POST /api/tts`) responds with `audio/mpeg` binary data rather than JSON.
+
+## Response Format
+
+Successful responses return a JSON object with fields relevant to the operation. Most responses also embed a fresh `entitlement` snapshot so the PWA can update quota displays without a separate round trip.
+
+Error responses always include a `message` string:
+
+```json title="Error response shape"
+{
+  "message": "Human-readable description of the error.",
+  "entitlement": { }
+}
+```
+
+Entitlement-gated errors additionally include the full `entitlement` object so the client can distinguish between quota exhaustion, plan upgrade requirements, and account disablement.
+
+## Error Handling
+
+The API maps failure conditions to standard HTTP status codes.
+
+| Status | Condition |
+|---|---|
+| `400` | Invalid or missing request body, including Zod validation failures. The response includes `message` with field-level detail where available. |
+| `401` | Authentication required — valid JWT not present or guest trial exhausted for a feature that requires sign-in. |
+| `402` | Entitlement check failed — quota exhausted, plan does not include the feature, or live minutes depleted. |
+| `403` | Account disabled or admin access required for an admin-only endpoint. |
+| `404` | Resource not found (e.g. unknown offline pack id). |
+| `409` | Conflict — e.g. the requested username is already taken. |
+| `413` | Request body too large (image or file exceeded the 12 MB limit). |
+| `429` | Rate limit exceeded — guest IP bucket full, or username cooldown still active. |
+| `500` | Unexpected server-side error. |
+| `503` | Dependency unavailable — e.g. Azure Speech not configured, health check failed. |
+
+### ZodError — 400
+
+When a request body fails schema validation with Zod, the handler returns HTTP 400 with a `message` field. Zod errors are caught at the handler level, not globally, so the shape remains consistent with all other error responses.
+
+```json title="ZodError response"
+{
+  "message": "Invalid details enrich payload"
+}
+```
+
+### Auth failures — 401
+
+Handlers that gate on sign-in set `401` when `req.auth` is absent and the feature cannot be used by guests.
+
+```json title="401 response"
+{
+  "message": "Please log in to use live translation.",
+  "entitlement": { "loggedIn": false, "plan": "guest", ... }
+}
+```
+
+### Entitlement failures — 402 / 403
+
+When a signed-in user's plan does not permit the requested feature, or when quota is exhausted, handlers return `402` with a `reason` field embedded inside the `entitlement` object.
+
+```json title="402 response"
+{
+  "message": "Live minutes exhausted for this month.",
+  "entitlement": {
+    "allowed": { "live": false },
+    "reason": "live_quota_exhausted",
+    ...
+  }
+}
+```
+
+Account-disabled responses use `403` with `reason: "account_disabled"`.
+
+## Endpoint Index
+
+The table below lists every registered route in `app.ts`, grouped by functional category.
+
+### Core
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | SPA bootstrap — returns service readiness, engine flags, incident banner, and current entitlement. |
+| `GET` | `/api/entitlement` | Returns the caller's current entitlement snapshot (plan, quota remaining, prefs). |
+| `GET` | `/api/auth-config` | Returns the public Supabase URL and anon key so the PWA can initialise its Supabase client at runtime. |
+
+### Translation
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/translate` | Translate text between Cantonese, English, and other supported languages via the configured LLM. |
+| `POST` | `/api/breakdown` | Return a token-by-token character breakdown with Jyutping romanisation and per-token gloss. |
+| `POST` | `/api/details/enrich` | Fetch enriched dictionary entry data — senses, examples, usage notes, and AI-generated visuals. |
+
+### Speech
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/speech-token` | Issue a short-lived Azure Cognitive Services speech token for real-time STT in the browser. Debits prepaid live seconds. |
+| `POST` | `/api/tts` | Synthesise text to speech via Azure TTS. Responds with `audio/mpeg`. Respects per-language voice preferences. |
+
+### Camera
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/camera/scan` | Run OCR (Azure Vision + optional LLM fallback) on a base64-encoded image and return translated text. |
+| `POST` | `/api/usage/camera-heartbeat` | Record camera session seconds for admin metering (does not deduct scan credits). |
+
+### Documents
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/docs/translate` | Translate an Office or TXT document file, preserving layout. Bills pages on success. Requires sign-in. |
+| `POST` | `/api/docs/segments` | Translate a batch of PDF text segments extracted client-side. Bills estimated pages per call. Requires sign-in. |
+| `POST` | `/api/docs/commit` | Finalise a PDF hybrid job, billing any pages not already prepaid via `/api/docs/segments`. Requires sign-in. |
+
+### Usage
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/usage/heartbeat` | Record live speech session seconds and return a refreshed entitlement. |
+
+### Preferences
+
+| Method | Path | Description |
+|---|---|---|
+| `PATCH` | `/api/prefs/tts-voices` | Save per-language TTS voice preferences across devices. Requires sign-in. |
+| `PATCH` | `/api/prefs/auto-speak` | Toggle automatic speech playback after each translation. Requires sign-in. |
+| `PATCH` | `/api/prefs/primary-lang` | Set the user's primary target language for the Account Hub. Requires sign-in. |
+| `PATCH` | `/api/prefs/username` | Set or change the Account Hub display username (1-hour cooldown between changes). Requires sign-in. |
+
+### History
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/history` | Retrieve the caller's Solo and Conversation translation history turns (last 14 days). |
+| `PUT` | `/api/history` | Upsert translation history turns and prune stale entries older than 14 days. |
+
+### Billing
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/billing/checkout` | Create a Stripe Checkout session and return the session URL. Requires sign-in. |
+| `POST` | `/api/billing/portal` | Create a Stripe Customer Portal session for subscription management. Requires sign-in. |
+| `POST` | `/api/billing/webhook` | Receive Stripe webhook events (raw body). Verifies `Stripe-Signature` header. |
+
+### Household
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/household` | Return the caller's household, seat count, and member list. Requires sign-in. |
+| `POST` | `/api/household/invites` | Send a household invite to another user by email. Requires sign-in. |
+| `POST` | `/api/household/accept` | Accept a pending household invite by token. Requires sign-in. |
+| `DELETE` | `/api/household/invites/:id` | Cancel a pending outbound invite. Requires sign-in. |
+| `DELETE` | `/api/household/members/:userId` | Remove a member from the household. Requires sign-in. |
+
+### Harbor Quest
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/harbor-quest` | Retrieve the caller's Harbor Quest progress and gear state. |
+| `PUT` | `/api/harbor-quest` | Sync Harbor Quest progress from the client (rate-limited per user). |
+| `POST` | `/api/harbor-quest/gift` | Send a gift to another Harbor Quest participant (rate-limited per user). |
+| `GET` | `/api/harbor-quest/leaderboard` | Return the global Harbor Quest XP leaderboard. |
+| `GET` | `/api/practice-partner/leaderboard` | Return the global Practice Partner leaderboard (XP, best streak, passes). |
+| `PUT` | `/api/practice-partner/leaderboard` | Sync the caller's Practice Partner leaderboard entry. |
+
+### Push Notifications
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/push/config` | Return the VAPID public key needed by the PWA service worker to subscribe. |
+| `POST` | `/api/push/subscribe` | Register a Web Push subscription endpoint (rate-limited by IP). |
+| `POST` | `/api/push/unsubscribe` | Remove a Web Push subscription endpoint. |
+
+### Offline Packs
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/offline-pack/manifest` | Return the manifest of all available offline dictionary packs. Cached 1 hour. |
+| `GET` | `/api/offline-pack/:id` | Return the full JSON for a named offline dictionary pack. Cached 24 hours. |
+
+### Bug Reports
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/bug-report` | Submit a bug report from the in-app reporter. |
+
+### Admin
+
+All `/api/admin/*` routes require the caller to be authenticated **and** have admin access — either via the `YUE_ADMIN_EMAILS` allowlist or an assigned `admin` role on their profile.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/admin/me` | Return the signed-in admin's identity and role. |
+| `GET` | `/api/admin/users` | Paginated list of all users with plan, usage, and role. |
+| `GET` | `/api/admin/users.csv` | Export all users as a CSV download. |
+| `GET` | `/api/admin/users/:userId/usage` | Return detailed usage breakdown for a single user. |
+| `PATCH` | `/api/admin/users/:userId/plan` | Override a user's plan (`free`, `family`, `business`). |
+| `PATCH` | `/api/admin/users/:userId/role` | Assign or clear a role badge (`admin`, `family`, or `null`). |
+| `POST` | `/api/admin/users/:userId/reset-usage` | Reset the current-month usage counters for a user. |
+| `PATCH` | `/api/admin/users/:userId/disabled` | Enable or disable a user account. |
+| `GET` | `/api/admin/audit` | Return the admin audit log. |
+| `GET` | `/api/admin/bug-reports` | List all submitted bug reports. |
+| `PATCH` | `/api/admin/bug-reports/:reportId/status` | Update the triage status of a bug report. |
+| `POST` | `/api/admin/bug-reports/:reportId/ai-answer` | Generate an AI-assisted reply draft for a bug report. |
+| `POST` | `/api/admin/bug-reports/:reportId/resend-email` | Re-send the confirmation email for a bug report. |
+| `GET` | `/api/admin/incident-banner` | Read the current site-wide incident banner state. |
+| `PATCH` | `/api/admin/incident-banner` | Toggle or update the site-wide incident banner message. |
+| `POST` | `/api/admin/resend-audience/sync` | Backfill all Supabase Auth users into the Resend Audience. |
+| `POST` | `/api/admin/household-usage/backfill` | Fold legacy per-user usage meters into household pools. |
+| `GET` | `/api/admin/email/templates` | List saved campaign email templates. |
+| `POST` | `/api/admin/email/templates` | Create or update a campaign email template. |
+| `DELETE` | `/api/admin/email/templates/:templateId` | Archive a campaign email template. |
+| `GET` | `/api/admin/email/contacts` | List Resend Audience contacts. |
+| `GET` | `/api/admin/email/sends` | List campaign email send history. |
+| `POST` | `/api/admin/email/preview` | Render a campaign template preview without sending. |
+| `POST` | `/api/admin/email/draft` | Save a campaign draft. |
+| `POST` | `/api/admin/email/send` | Send a campaign email to a Resend Audience segment. |
+| `GET` | `/api/admin/push/stats` | Return push notification delivery statistics. |
+| `GET` | `/api/admin/push/sends` | List push notification send history. |
+| `POST` | `/api/admin/push/send` | Send a push notification to all or selected subscribers. |
+| `POST` | `/api/admin/practice-partner/chat` | Admin debug endpoint for the Practice Partner LLM conversation. |
+
+## Individual Endpoint Pages
+
+<CardGroup cols={3}>
+  <Card title="Health & Entitlement" icon="heart-pulse" href="/api/health">
+    Bootstrap, readiness flags, and quota snapshots.
+  </Card>
+  <Card title="Translation" icon="language" href="/api/translate">
+    Text translation and character breakdown endpoints.
+  </Card>
+  <Card title="Speech & TTS" icon="microphone" href="/api/tts-speech">
+    Azure speech tokens and text-to-speech synthesis.
+  </Card>
+  <Card title="Camera" icon="camera" href="/api/camera">
+    OCR scan and camera session heartbeat.
+  </Card>
+  <Card title="Documents" icon="file-lines" href="/api/documents">
+    Office, TXT, and PDF hybrid document translation.
+  </Card>
+  <Card title="Usage" icon="chart-bar" href="/api/usage">
+    Live session heartbeat and camera session metering.
+  </Card>
+  <Card title="Billing" icon="credit-card" href="/api/billing">
+    Stripe Checkout, portal, and webhook handling.
+  </Card>
+  <Card title="Household" icon="house" href="/api/household">
+    Family plan seat management and invite flow.
+  </Card>
+  <Card title="Harbor Quest" icon="map" href="/api/harbor-quest">
+    Gamification progress, gifts, and leaderboards.
+  </Card>
+</CardGroup>

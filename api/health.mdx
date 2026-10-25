@@ -1,0 +1,260 @@
+---
+title: "GET /api/health and /api/entitlement"
+sidebarTitle: "Health & Entitlement"
+description: "GET /api/health returns engine availability and incident banner status. GET /api/entitlement returns the caller's plan, limits, usage, and feature gates."
+---
+
+The health and entitlement endpoints are the first calls JyutTranslate's SPA makes on startup. `GET /api/health` is public and requires no authentication — it returns a JSON snapshot of which engines are configured, whether an incident banner is active, and the full entitlement snapshot for the requesting user (or guest). `GET /api/entitlement` returns the same entitlement object in isolation, and is useful for refreshing quota state after a billing event.
+
+## GET /api/health
+
+No authentication required. Returns a public readiness payload that includes engine flags, mode, push configuration, an optional incident banner, and the caller's full entitlement snapshot. The SPA uses this on cold boot to show the correct plan chip and gate features before any user interaction.
+
+```http title="Request"
+GET /api/health
+```
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` when the service is reachable. Returns `false` with HTTP 503 only when the handler itself throws.
+</ResponseField>
+
+<ResponseField name="product" type="string" required>
+  Always `"jyut"`.
+</ResponseField>
+
+<ResponseField name="service" type="string" required>
+  Always `"jyut-api"`.
+</ResponseField>
+
+<ResponseField name="mode" type='"open" | "cloud"' required>
+  `"open"` when `YUE_OPEN_MODE=1` (local dev / self-host with no metering). `"cloud"` for production.
+</ResponseField>
+
+<ResponseField name="cloudReady" type="boolean" required>
+  `true` when both `AZURE_SPEECH_KEY` and an OpenAI-compatible API key are set. Used by the SPA to decide whether to show the "Add API key" onboarding prompt.
+</ResponseField>
+
+<ResponseField name="engines" type="object" required>
+  <Expandable title="engines fields">
+    <ResponseField name="engines.openai" type="boolean">
+      `true` when an OpenAI-compatible API key is configured. Reflects `openaiConfigured()` — also `true` for local Ollama/LM Studio without a key when a `localhost` base URL is set.
+    </ResponseField>
+    <ResponseField name="engines.demo" type="boolean">
+      `true` when no OpenAI key is present. Translations will carry a `（示範）` prefix. See [resolving demo mode](#demo-mode) below.
+    </ResponseField>
+    <ResponseField name="engines.azureSpeech" type="boolean">
+      `true` when `AZURE_SPEECH_KEY` is set.
+    </ResponseField>
+    <ResponseField name="engines.azureVision" type="boolean">
+      `true` when both `AZURE_VISION_KEY` and `AZURE_VISION_ENDPOINT` are set.
+    </ResponseField>
+    <ResponseField name="engines.visionLlm" type="boolean">
+      `true` when a multimodal LLM OCR fallback is configured via `OPENAI_VISION_MODEL`.
+    </ResponseField>
+    <ResponseField name="engines.dictionary" type="boolean">
+      Always `true`. The bundled phrase-memory dictionary is always available.
+    </ResponseField>
+    <ResponseField name="engines.lexicon" type="boolean">
+      Always `true`. The CC-Canto lexicon is always loaded.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="push" type="object" required>
+  <Expandable title="push fields">
+    <ResponseField name="push.configured" type="boolean">
+      `true` when VAPID keys are present and Web Push is operational.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="incidentBanner" type="string | null" required>
+  A short human-readable status message to display in the SPA header, or `null` when there is no active incident. Set by an admin via `PATCH /api/admin/incident-banner`.
+</ResponseField>
+
+<ResponseField name="entitlement" type="object" required>
+  The full entitlement snapshot for the requesting user or guest. See [entitlement shape](#entitlement-snapshot-shape) below.
+</ResponseField>
+
+```bash title="Example"
+curl https://api.jyuttranslate.com/api/health
+```
+
+```json title="200 Response"
+{
+  "ok": true,
+  "product": "jyut",
+  "service": "jyut-api",
+  "mode": "cloud",
+  "cloudReady": true,
+  "engines": {
+    "azureSpeech": true,
+    "azureVision": true,
+    "visionLlm": false,
+    "openai": true,
+    "demo": false,
+    "dictionary": true,
+    "lexicon": true
+  },
+  "push": { "configured": true },
+  "incidentBanner": null,
+  "entitlement": { "...": "see below" }
+}
+```
+
+---
+
+## GET /api/entitlement
+
+Returns only the entitlement snapshot for the requesting caller. Requires an active session cookie (signed-in) or a valid guest cookie (`yue_guest_id`). Use this to refresh quota state after upgrading a plan or after a billing webhook fires, without re-fetching the full health payload.
+
+```http title="Request"
+GET /api/entitlement
+```
+
+```bash title="Example"
+curl https://api.jyuttranslate.com/api/entitlement \
+  -H "Cookie: sb-access-token=<supabase-jwt>"
+```
+
+---
+
+## Entitlement Snapshot Shape
+
+Both endpoints return the same entitlement object. The canonical example below is for a Free plan user in month `2026_08`.
+
+```json title="Entitlement snapshot"
+{
+  "loggedIn": true,
+  "requireLogin": true,
+  "plan": "free",
+  "limits": {
+    "plan": "free",
+    "live_minutes": 60,
+    "tts_chars": 30000,
+    "camera_scans": 120,
+    "docs_pages": 40,
+    "auto_speak": false,
+    "can_live": true,
+    "can_camera": true,
+    "can_docs": true,
+    "text_translate": true
+  },
+  "usage": {
+    "month": "2026_08",
+    "liveSeconds": 120,
+    "ttsChars": 800,
+    "translateCount": 3,
+    "cameraSeconds": 40,
+    "cameraTranslateCount": 2,
+    "docsPages": 4,
+    "aiVisionCount": 2
+  },
+  "remaining": {
+    "liveSeconds": 3480,
+    "ttsChars": 29200,
+    "cameraScans": 118,
+    "cameraSeconds": -1,
+    "docsPages": 36,
+    "aiVisionCount": 198
+  },
+  "ttsUnlimited": false,
+  "cameraUnlimited": false,
+  "docsUnlimited": false,
+  "allowed": {
+    "live": true,
+    "autoSpeak": false,
+    "textTranslate": true,
+    "tts": true,
+    "camera": true,
+    "docs": true,
+    "aiVision": true
+  },
+  "prefs": {
+    "ttsVoiceYue": "zh-HK-HiuMaanNeural",
+    "ttsVoiceEn": "en-US-JennyNeural",
+    "autoSpeak": false,
+    "username": null,
+    "usernameChangedAt": null
+  },
+  "upgradeUrl": "https://www.example.com/#/pricing",
+  "loginUrl": null,
+  "reason": null
+}
+```
+
+<ResponseField name="loggedIn" type="boolean">
+  `true` for signed-in users, `false` for guests.
+</ResponseField>
+
+<ResponseField name="requireLogin" type="boolean">
+  Mirrors the `YUE_REQUIRE_LOGIN` environment variable. When `true`, guests must sign in to access metered features.
+</ResponseField>
+
+<ResponseField name="plan" type='"guest" | "free" | "family" | "business"'>
+  The caller's active plan.
+</ResponseField>
+
+<ResponseField name="limits" type="object">
+  The monthly caps for this plan. `live_minutes`, `tts_chars`, `camera_scans`, and `docs_pages` are `0` for unlimited plans (Family/Business); use the `ttsUnlimited`, `cameraUnlimited`, and `docsUnlimited` flags instead of checking for `0`.
+</ResponseField>
+
+<ResponseField name="usage" type="object">
+  Actual consumption for the current billing month. `month` is `YYYY_MM`.
+</ResponseField>
+
+<ResponseField name="remaining" type="object">
+  Pre-computed headroom. `-1` means the meter is unlimited.
+</ResponseField>
+
+<ResponseField name="ttsUnlimited" type="boolean">
+  `true` for Family and Business plans.
+</ResponseField>
+
+<ResponseField name="cameraUnlimited" type="boolean">
+  `true` for Business plans.
+</ResponseField>
+
+<ResponseField name="docsUnlimited" type="boolean">
+  `true` for Business plans.
+</ResponseField>
+
+<ResponseField name="allowed" type="object">
+  Boolean feature gates computed from plan + usage. The API checks these before processing each request.
+  <Expandable title="allowed fields">
+    <ResponseField name="allowed.live" type="boolean">Gate for `GET /api/speech-token` and live mic STT.</ResponseField>
+    <ResponseField name="allowed.autoSpeak" type="boolean">Gate for auto-speak playback (Family/Business only).</ResponseField>
+    <ResponseField name="allowed.textTranslate" type="boolean">Gate for `POST /api/translate`, `POST /api/breakdown`, and `POST /api/details/enrich`.</ResponseField>
+    <ResponseField name="allowed.tts" type="boolean">Gate for `POST /api/tts`.</ResponseField>
+    <ResponseField name="allowed.camera" type="boolean">Gate for `POST /api/camera/scan` (AR / Upload).</ResponseField>
+    <ResponseField name="allowed.docs" type="boolean">Gate for all `/api/docs/*` endpoints. Requires sign-in.</ResponseField>
+    <ResponseField name="allowed.aiVision" type="boolean">Gate for the multimodal LLM OCR fallback inside camera scan.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="prefs" type="object">
+  Cross-device preferences synced via Supabase. Includes preferred TTS voices per language and `autoSpeak`.
+</ResponseField>
+
+<ResponseField name="reason" type="string | null">
+  Machine-readable denial reason when a feature is blocked, e.g. `"login_required"`, `"tts_quota_exhausted"`, `"camera_quota_exhausted"`, `"account_disabled"`. `null` when everything is allowed.
+</ResponseField>
+
+---
+
+## Demo Mode
+
+When `engines.demo` is `true`, no OpenAI-compatible API key is configured. The translation engine falls back to the bundled phrase-memory dictionary and lexicon only. Text that has no dictionary match is returned as-is with a `（示範）` prefix (Cantonese) or `(demo)` prefix (English). Live STT, camera OCR translation, and document translation still require their respective Azure keys.
+
+<Note>
+  To exit demo mode, set `OPENAI_API_KEY` in `apps/api/.env` (or your deployment environment), then restart the API server. `cloudReady` will flip to `true` once both the OpenAI key and `AZURE_SPEECH_KEY` are present.
+</Note>
+
+```env title="apps/api/.env"
+OPENAI_API_KEY=sk-...
+# Optional: use a compatible provider (e.g. DeepSeek)
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+OPENAI_MODEL=deepseek-chat
+```

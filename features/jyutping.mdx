@@ -1,0 +1,120 @@
+---
+title: "Jyutping Romanization with Chao Tone Letters"
+sidebarTitle: "Jyutping"
+description: "JyutTranslate uses the LSHK Jyutping scheme with tone numbers 1–6, Chao tone letter contours, and interactive character drill-down for Cantonese learners."
+---
+
+JyutTranslate displays Cantonese romanization using the **LSHK Jyutping scheme** — the standard set by the Linguistic Society of Hong Kong. Every Cantonese translation result shows Jyutping below the Han characters. Tone numbers follow each syllable as plain ASCII digits (LSHK specification), and the matching Chao tone letter contour (赵元任调值字母) can appear alongside them for learners. The implementation lives in `apps/web/src/lib/jyutping.ts` and `apps/web/src/components/JyutRuby.tsx`.
+
+## The LSHK Jyutping scheme
+
+Jyutping was defined by the Linguistic Society of Hong Kong (香港語言學學會) and is the canonical romanization system used throughout JyutTranslate. Each syllable is written as an initial consonant (optional), a nucleus vowel or diphthong, an optional coda, and a tone digit 1–6.
+
+**Example:** 早晨 (Good morning) → `zou2 san4`
+
+## Tones 1–6
+
+Cantonese has six contrastive tones. Each is assigned a number and a matching Chao tone letter string that visually represents the pitch contour.
+
+| Number | Contour (English) | Chao Letters | Example | Cue |
+|--------|-------------------|--------------|---------|-----|
+| 1 | High level | ˥ | 詩 (si1) | High and steady |
+| 2 | High rising | ˧˥ | 史 (si2) | Rises toward the top |
+| 3 | Mid level | ˧ | 試 (si3) | Level in the middle |
+| 4 | Low falling | ˨˩ | 時 (si4) | Low, slightly falling |
+| 5 | Low rising | ˩˧ | 市 (si5) | Rises from low to mid |
+| 6 | Low level | ˨ | 事 (si6) | Low and steady |
+
+<Info>
+  The tone table maps onto the traditional 陰/陽 × 平/上/去/入 grid. 陰平 = 1, 陰上 = 2, 陰去 = 3; 陽平 = 4, 陽上 = 5, 陽去 = 6. Entering tones (入聲, syllables ending in -p / -t / -k) reuse tones 1, 3, and 6 — they do not have separate numbers.
+</Info>
+
+### Entering tones (入聲)
+
+Syllables that end in a stop consonant (`-p`, `-t`, `-k`) are *entering tones*. LSHK reuses the existing tone numbers rather than defining new ones:
+
+- 識 (sik1) — high level stop → reuses **1** (˥)
+- 洩 (sit3) — mid level stop → reuses **3** (˧)
+- 蝕 (sit6) — low level stop → reuses **6** (˨)
+
+Tone numbers remain ordinary ASCII digits — not superscript — as LSHK specifies. Colors or appended Chao letters are fine for teaching purposes.
+
+## Display modes
+
+JyutTranslate renders Jyutping in two modes depending on context.
+
+<Tabs>
+  <Tab title="Compact">
+    The always-visible translation line shows syllables with tone numbers only:
+
+    ```
+    zou2 san4
+    ```
+
+    This keeps the translation line uncluttered and is the default view for every completed translation.
+  </Tab>
+  <Tab title="Detailed">
+    Hovering or tapping the Jyutping line expands to a per-syllable ruby view. Each syllable shows the Han character above it and the Jyutping with Chao tone letters below:
+
+    ```
+    早        晨
+    zou2 ˧˥   san4 ˨˩
+    ```
+
+    Chao tone letters are rendered in a `.chao-face` span using Noto Sans for consistent glyph display.
+  </Tab>
+</Tabs>
+
+## Character drill-down
+
+When a definition exists for a Han character in the lexicon, tapping that character in the detailed view opens a closable panel with:
+
+- The Jyutping syllable and tone number
+- The Chao tone letter contour (e.g. ˧˥ for tone 2)
+- The character's individual sense or definition
+- The phrase-level gloss from the dictionary
+
+This panel is implemented in `apps/web/src/components/JpPop.tsx`.
+
+## Chao tone letter rendering modes
+
+The `JYUTPING_UI_TONE_MODE` constant in `jyutping.ts` controls how Chao letters appear on screen:
+
+<Accordion title="Available tone display modes">
+  | Mode | Behaviour |
+  |------|-----------|
+  | `'unicode'` (default) | Chao letters appear as Unicode text nodes (˥ ˧˥ ˧ ˨˩ ˩˧ ˨) inside a `.chao-face` span |
+  | `'obfuscated'` | Canvas-painted Chao glyphs — no text nodes in the DOM |
+  | `'svg'` | SVG stroke contours showing the pitch shape as a drawn line |
+</Accordion>
+
+## Copying Jyutping + Chao tone letters
+
+The **Copy Jyutping + Chao tone letters** feature copies the full syllable + tone number + contour string for each syllable, for example:
+
+```
+teng1˥ sam1˥ haa6˨ ...
+```
+
+This uses the `rubyJpSyllable()` function in `jyutping.ts` and is available on the **Family plan and above**. Free and guest users who select Jyutping text and attempt to copy it encounter the `JYUTPING_SELECT_COPY_TRAP` gate.
+
+<Warning>
+  `JYUTPING_SELECT_COPY_TRAP` is `true` by default. When active, Free and guest users who select ruby text and copy see the message: *"Jyutping + Chao tone letters is a Family+ plan feature. Please upgrade to copy."* Family and Business users are exempt. Set the flag to `false` in `jyutping.ts` to disable the gate entirely.
+</Warning>
+
+## Implementation reference
+
+<CardGroup cols={2}>
+  <Card title="jyutping.ts" icon="code">
+    Core library: `rubyJpSyllable()`, `ensureJyutpingSegs()`, `withChaoFace()`, `JYUTPING_UI_TONE_MODE`, `JYUTPING_SELECT_COPY_TRAP`. Located at `apps/web/src/lib/jyutping.ts`.
+  </Card>
+  <Card title="JyutRuby.tsx" icon="code">
+    React component that renders per-syllable ruby markup for translations. Consumes segments from `ensureJyutpingSegs()`. Located at `apps/web/src/components/JyutRuby.tsx`.
+  </Card>
+  <Card title="JpPop.tsx" icon="window">
+    Character drill-down panel component. Shows tone contour, Chao letters, and per-character sense on tap. Located at `apps/web/src/components/JpPop.tsx`.
+  </Card>
+  <Card title="chaoTonePaint.ts" icon="paintbrush">
+    Canvas painter for `'obfuscated'` mode. `chaoToneCipher.ts` handles the cipher layer. Both in `apps/web/src/lib/`.
+  </Card>
+</CardGroup>

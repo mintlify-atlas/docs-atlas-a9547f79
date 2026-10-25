@@ -1,0 +1,172 @@
+---
+title: "Billing API: Stripe Checkout, Portal, and Webhooks"
+sidebarTitle: "Billing"
+description: "POST /api/billing/checkout starts a Stripe Checkout session with promotion codes enabled. /api/billing/webhook handles subscription lifecycle events to update user plans."
+---
+
+JyutTranslate uses Stripe for subscription billing. Three endpoints cover the complete subscription lifecycle: starting a checkout, managing an active subscription via the customer portal, and receiving webhook events from Stripe to keep the database plan column in sync. All billing endpoints require a signed-in user; the webhook endpoint additionally verifies a Stripe signature before processing any event.
+
+## Environment variables
+
+Configure the following variables in your `.env` file (see `apps/api/.env.example`):
+
+```bash title="apps/api/.env"
+STRIPE_SECRET_KEY=sk_live_…
+STRIPE_WEBHOOK_SECRET=whsec_…
+STRIPE_PRICE_FAMILY_MONTH=price_…
+STRIPE_PRICE_FAMILY_YEAR=price_…
+STRIPE_PRICE_BUSINESS_MONTH=price_…
+STRIPE_PRICE_BUSINESS_YEAR=price_…
+```
+
+<Warning>
+  If any of the `STRIPE_PRICE_*` variables are missing for a given plan, `POST /api/billing/checkout` returns `400 { message: "Price is not configured for this plan." }` rather than creating a broken session.
+</Warning>
+
+---
+
+## POST /api/billing/checkout
+
+Creates a Stripe Checkout session in `subscription` mode and returns the hosted Checkout URL. The caller's browser should redirect to this URL to complete payment. Requires a signed-in user (`Authorization: Bearer <supabase_jwt>`).
+
+<Note>
+  `allow_promotion_codes: true` is set on every checkout session. To honour a discount, create a **Promotion Code** in the Stripe Dashboard (Promotions → Promotion codes). A bare coupon ID cannot be entered by the customer at checkout — it must be wrapped in a Promotion Code.
+</Note>
+
+### Request
+
+```json title="POST /api/billing/checkout"
+{
+  "plan": "family",
+  "interval": "month"
+}
+```
+
+<ParamField body="plan" type="string" required>
+  Subscription plan. Accepted values: `"family"` or `"business"`. Legacy aliases `"pro"` (→ family) and `"max"` (→ business) are also accepted for backward compatibility.
+</ParamField>
+
+<ParamField body="interval" type="string">
+  Billing interval. `"month"` (default) or `"year"`. Determines which Stripe Price ID is used.
+</ParamField>
+
+### Response
+
+```json title="200 OK"
+{
+  "url": "https://checkout.stripe.com/pay/cs_live_…"
+}
+```
+
+<ResponseField name="url" type="string">
+  Stripe-hosted Checkout URL. Redirect the browser here to complete the subscription. After a successful payment, Stripe redirects back to `/#/app?checkout=success`. On cancel, the user is sent to `/#/pricing?checkout=cancel`.
+</ResponseField>
+
+### Existing customers
+
+If the user already has a `stripe_customer_id` stored in their profile, the session is created with `customer` set to that ID so Stripe pre-fills their payment method. New customers receive `customer_email` from their Supabase auth record instead.
+
+---
+
+## POST /api/billing/portal
+
+Opens a Stripe Customer Portal session for an existing subscriber to manage their payment method, view invoices, or cancel their subscription. Requires a signed-in user who already has a `stripe_customer_id` on their profile (i.e., they have previously subscribed).
+
+### Request
+
+No request body required.
+
+### Response
+
+```json title="200 OK"
+{
+  "url": "https://billing.stripe.com/session/…"
+}
+```
+
+<ResponseField name="url" type="string">
+  Stripe Customer Portal URL. After the user finishes managing their subscription, Stripe redirects them back to `/#/app`.
+</ResponseField>
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `400`  | User has no `stripe_customer_id` — they have never subscribed (`code: "no_stripe_customer"`) |
+| `401`  | Not signed in |
+| `502`  | Stripe Customer Portal returned an error. If the portal is not yet activated, the error message includes a hint to enable it in the Stripe Dashboard |
+| `503`  | `STRIPE_SECRET_KEY` is not configured |
+
+<Tip>
+  If you see a `502` with a portal-configuration message, go to **Stripe Dashboard → Settings → Billing → Customer portal** and click **Activate test link** (for test mode) or publish the portal configuration for live mode.
+</Tip>
+
+---
+
+## POST /api/billing/webhook
+
+Receives raw Stripe webhook events, verifies the `Stripe-Signature` header against `STRIPE_WEBHOOK_SECRET`, and updates the user's plan in Supabase. This endpoint uses `express.raw` body parsing — the raw buffer must reach the signature check unmodified.
+
+### Registering the webhook in Stripe
+
+<Steps>
+  <Step title="Open the Stripe Dashboard">
+    Navigate to **Developers → Webhooks** and click **Add endpoint**.
+  </Step>
+  <Step title="Set the endpoint URL">
+    Enter `https://www.jyuttranslate.com/api/billing/webhook` as the destination.
+  </Step>
+  <Step title="Select events">
+    Enable the following events:
+    - `checkout.session.completed`
+    - `customer.subscription.updated`
+    - `customer.subscription.deleted`
+  </Step>
+  <Step title="Copy the signing secret">
+    After saving, click **Reveal** next to the signing secret and copy it to `STRIPE_WEBHOOK_SECRET` in your environment.
+  </Step>
+</Steps>
+
+### Events handled
+
+<Accordion title="checkout.session.completed">
+  Fires after a successful Stripe Checkout payment. The handler reads `client_reference_id` (or `metadata.user_id`) from the session to identify the JyutTranslate user, then upgrades their `profiles.plan` to `"family"` or `"business"` and stores the Stripe customer and subscription IDs.
+
+  If this is a new upgrade (previous plan differed), a notification email is dispatched and the user is synced to the Resend audience.
+</Accordion>
+
+<Accordion title="customer.subscription.updated">
+  Fires when Stripe changes a subscription (e.g. plan switch via the portal). The handler looks up the profile by subscription ID (or falls back to customer ID), reads the active Price ID from `subscription.items.data[0].price.id`, maps it back to `"family"` or `"business"`, and updates `profiles.plan` accordingly.
+</Accordion>
+
+<Accordion title="customer.subscription.deleted">
+  Fires when a subscription is cancelled or enters `canceled`/`unpaid` status. The handler downgrades the user to the `"free"` plan and clears `stripe_subscription_id`. Usage counters are not reset — the user's history is preserved.
+</Accordion>
+
+### Plan propagation to households
+
+After every plan change, `syncOwnerPlanForUser` is called for `"family"` and `"business"` upgrades. This ensures the owner's `households` row and all household members see the updated plan without requiring a separate sync step.
+
+### Signature verification
+
+```typescript title="Signature check (billing.ts)"
+event = client.webhooks.constructEvent(
+  req.body as Buffer,
+  req.headers['stripe-signature'],
+  env.stripeWebhookSecret
+)
+```
+
+A missing or invalid signature returns `400`. A missing `STRIPE_WEBHOOK_SECRET` returns `503`.
+
+<Warning>
+  Never forward Stripe webhook payloads through a JSON-parsing middleware layer. The raw body must be intact for signature verification. In JyutTranslate, the `/api/billing/webhook` route is registered **before** the global `express.json()` middleware using `express.raw({ type: 'application/json' })`.
+</Warning>
+
+### Webhook response
+
+```json title="200 OK"
+{ "received": true }
+```
+
+Stripe requires a `2xx` response within 30 seconds. Any unhandled event type returns `200` immediately without error.

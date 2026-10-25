@@ -1,0 +1,151 @@
+---
+title: "Testing JyutTranslate: Smoke Tests and Quality Bots"
+sidebarTitle: "Testing"
+description: "Run JyutTranslate's offline smoke suite, quality translation bots, Harbor Quest tests, and manual mic checks to verify your local or production setup."
+---
+
+JyutTranslate ships with a layered test strategy: an offline smoke suite that runs with no live keys, an automated translation quality bot that exercises both the API and the rendered UI, a live pipeline bot that hits real DeepSeek and Azure endpoints, and Harbor Quest smokes that verify the Jyutping learning engine. Together they give you confidence from a cold checkout through to a production deploy, without requiring a mic or a paid Azure subscription for the fast path.
+
+## Quality Bot
+
+The quality bot (`npm run test:translate`) checks that real translations flow end-to-end when both the API and web dev servers are running. Run it from the repo root with both servers started:
+
+```bash
+npm run dev:api    # terminal 1 — starts on :8787
+npm run dev:web    # terminal 2 — starts on :5173
+npm run test:translate  # terminal 3
+```
+
+The bot performs three checks in sequence:
+
+<Steps>
+  <Step title="API translation check">
+    Translates several English and Cantonese phrases via the API. Asserts that `engine !== "demo"` and rejects gloss-dump junk output.
+  </Step>
+  <Step title="UI speech synthesis check">
+    Opens Solo and Conversation in a headless browser, uses the browser's `speechSynthesis` API to "speak" each line, then runs the same final translate path as a post-mic capture (`translateTyped`).
+  </Step>
+  <Step title="Translation pane assertion">
+    Confirms the translation pane shows a clean result — not the source text, not a dictionary dump — for at least **3** successful non-demo translations.
+  </Step>
+</Steps>
+
+### Environment Flags
+
+| Variable | Effect |
+|----------|--------|
+| `SKIP_UI=1` | Run API cases only; skip the browser UI check |
+| `REQUIRE_OPENAI=1` | Fail the run if `GET /api/health` reports `engines.openai=false` |
+| `API_BASE` | Override the default API base URL (`:8787`) |
+| `WEB_BASE` | Override the default web base URL (`:5173`) |
+
+## Live Pipeline Bot
+
+The live pipeline bot verifies Azure speech tokens, TTS with Free-quota and Family-plan metering, DeepSeek model translation, and the Solo UI — all together in a single run.
+
+```bash
+npm run test:translate:live
+```
+
+This bot uses **novel phrases** that have never been seen by the phrase-memory cache, ensuring the request reaches DeepSeek rather than being served from memory.
+
+<Warning>
+  Cloud agents must only run `test:translate:live` when Henry explicitly approves that specific request. It consumes paid DeepSeek and Azure quota.
+</Warning>
+
+## Offline Smoke Suite
+
+The offline smoke suite runs entirely without live API keys and completes in seconds. It covers the core logic that must never regress: entitlements, usage metering, household pooling, translation history TTL, the Cantonese dictionary, and more.
+
+```bash
+npm run smoke:all        # full suite
+npm run smoke:canto      # Cantonese dictionary / lexicon only
+```
+
+`smoke:all` runs each script in sequence from `apps/api/`:
+
+| Script | Covers |
+|--------|--------|
+| `smoke:entitlements` | Entitlement helper shapes and plan gating |
+| `smoke:usage` | Usage increment atomicity and shape |
+| `smoke:household-usage` | Household usage merge and pooling |
+| `smoke:admin-usage-range` | Admin usage range query logic |
+| `smoke:guest-rl` | Guest rate limit enforcement |
+| `smoke:guest-identity` | Guest device/network identity anchors |
+| `smoke:history` | Translation history TTL (14-day prune) |
+| `smoke:canto` | Cantonese phrase memory, scrub, attestation, lexicon exact-only 粵→EN |
+| `smoke:details-enrich` | Details enrichment pipeline |
+| `smoke:translate-camera` | Camera scan translate path |
+| `smoke:harbor-quest` | Harbor Quest API offline logic |
+| `smoke:practice-partner` | Practice Partner AI, performance, and leaderboard |
+
+## Harbor Quest Offline Smokes
+
+The Harbor Quest learning engine has dedicated TypeScript smoke files that exercise the front-end logic, progress tracking, face/character rendering, and the API backend — all offline.
+
+```bash
+npx tsx apps/web/src/landing/learn/harborQuest.smoke.ts
+npx tsx apps/web/src/landing/learn/progress.smoke.ts
+npx tsx apps/web/src/landing/learn/matchDefinition.smoke.ts
+npx tsx apps/web/src/landing/learn/harborAnimeFace.smoke.ts
+npx tsx apps/web/src/landing/learn/harborCharacterLooks.smoke.ts
+npx tsx apps/api/src/harborQuest.smoke.ts
+```
+
+Run these after making any changes to the Jyutping lesson data, progress persistence, or the Harbor character rendering pipeline.
+
+## Manual Mic Check
+
+The manual mic check verifies the full real-time speech-to-translation loop on your machine or a physical phone. It requires a valid `OPENAI_API_KEY` (Azure is optional).
+
+<Steps>
+  <Step title="Set API keys and restart">
+    Add `OPENAI_API_KEY` (and optionally `AZURE_SPEECH_KEY`) to `apps/api/.env`, then restart the API dev server.
+  </Step>
+  <Step title="Open the app">
+    Navigate to [http://localhost:5173/?view=app](http://localhost:5173/?view=app). For a phone check, use a Cloudflare tunnel:
+    ```bash
+    npm run dev:tunnel
+    ```
+  </Step>
+  <Step title="Test Solo and Conversation">
+    In **Solo** or **Conversation** mode: hold or tap the mic, speak a phrase, release. Exactly **one** translation should appear on the target side with no demo prefix.
+  </Step>
+</Steps>
+
+## Demo Mode Diagnostics
+
+When translation keys are missing, JyutTranslate falls back to demo mode. Use this table to identify the cause and resolution.
+
+| Symptom | Cause | Resolution |
+|---------|-------|------------|
+| `（示範）…` prefix on output | No model key **and** phrase/lexicon cache miss | Set `OPENAI_API_KEY` in `apps/api/.env` and restart |
+| Clean phrase like `你做緊咩呀？` without OpenAI | Phrase memory or lexicon hit — not actually demo mode | Expected behaviour; phrase memory is working |
+| `GET /api/health` returns `"demo": true` | OpenAI not configured — model path offline | Add `OPENAI_API_KEY`; dictionary and lexicon still serve |
+| Online with OpenAI but slow | Phrase memory checked first, then model-only MT | Normal; CC-Canto is attestation only, not a translation source |
+
+## Screenshots for Docs
+
+Capture annotated screenshots of the UI for documentation:
+
+```bash
+npm run docs:screenshots   # writes to docs/demos/*.png
+```
+
+<Warning>
+  Camera Documents and Vision OCR screenshots are **manual** checks requiring paid Azure and model quota. Cloud agents must obtain Henry's approval before running these.
+</Warning>
+
+## Cantonese Quality Harness
+
+The Cantonese quality harness (`smoke:canto-quality`) is a Python script that runs a broader quality evaluation against both running servers. It is separate from the Node offline smoke suite and requires the API and web servers to be up.
+
+```bash
+npm run smoke:canto-quality
+# or directly:
+python3 scripts/canto-quality-harness/harness.py
+```
+
+<Note>
+  This harness needs both the API and web dev servers running and may consume translation quota if OpenAI is configured. Run it locally before deploying changes to the Cantonese translation or lexicon layers.
+</Note>

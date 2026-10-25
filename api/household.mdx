@@ -1,0 +1,260 @@
+---
+title: "Household API: Seats, Invites, and Members"
+sidebarTitle: "Household"
+description: "Manage Family and Business household seats via GET, POST, and DELETE endpoints for invites and members. Owner's Stripe plan applies to all household members."
+---
+
+JyutTranslate Family and Business subscribers can share their plan with other users through household seats. The owner sends email invites; invitees accept with a secure token; and usage from all members is pooled against the household's shared monthly quota. All household endpoints require a signed-in user (`Authorization: Bearer <supabase_jwt>`). Seat-management operations (invite, revoke, remove) additionally require the caller to be the household owner.
+
+<Note>
+  Household tables are added by migrations 011–015 (`apply_011_through_015_household.sql`). If these migrations have not been applied, all household endpoints return a `5xx` error with a hint to run the migration in the Supabase SQL Editor.
+</Note>
+
+## Seat limits
+
+| Plan | Seats (owner + members) |
+|------|--------------------------|
+| Family | 4 (owner + up to 3 members) |
+| Business | 10 (owner + up to 9 members) |
+
+Pending invites count against the seat limit. If all seats are occupied by members and pending invites, no new invite can be created until a pending invite is revoked or a member is removed.
+
+---
+
+## GET /api/household
+
+Returns the signed-in user's household state. Both owners and members can call this endpoint. The response includes the household plan, seat counts, the full member list with emails, and any pending invites.
+
+### Response
+
+```json title="200 OK"
+{
+  "household": {
+    "id": "uuid",
+    "plan": "family",
+    "seatLimit": 4,
+    "seatUsed": 2,
+    "role": "owner",
+    "pooled": true,
+    "members": [
+      {
+        "userId": "uuid",
+        "role": "owner",
+        "email": "owner@example.com",
+        "joinedAt": "2024-01-15T10:00:00.000Z"
+      },
+      {
+        "userId": "uuid",
+        "role": "member",
+        "email": "member@example.com",
+        "joinedAt": "2024-02-01T08:30:00.000Z"
+      }
+    ],
+    "pendingInvites": [
+      {
+        "id": "uuid",
+        "email": "pending@example.com",
+        "createdAt": "2024-03-01T12:00:00.000Z",
+        "expiresAt": "2024-03-08T12:00:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+<ResponseField name="household" type="object">
+  Null if the user is not in any household (i.e. they are on a free plan and have never been added to a paid household).
+
+  <Expandable title="household fields">
+    <ResponseField name="id" type="string">UUID of the household row.</ResponseField>
+    <ResponseField name="plan" type="string">`"family"` or `"business"`.</ResponseField>
+    <ResponseField name="seatLimit" type="number">Maximum seats for this plan (4 or 10).</ResponseField>
+    <ResponseField name="seatUsed" type="number">Members + pending invites combined.</ResponseField>
+    <ResponseField name="role" type="string">`"owner"` or `"member"` for the calling user.</ResponseField>
+    <ResponseField name="pooled" type="boolean">Always `true` — usage is pooled across the household.</ResponseField>
+    <ResponseField name="members" type="array">All joined members including the owner, ordered by `joined_at`.</ResponseField>
+    <ResponseField name="pendingInvites" type="array">Invites with `status = "pending"` that have not yet expired.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## POST /api/household/invites
+
+Sends a household invite to an email address. An invite email is dispatched via Resend (if configured). The caller must be the household owner on a Family or Business plan.
+
+### Request
+
+```json title="POST /api/household/invites"
+{
+  "email": "friend@example.com"
+}
+```
+
+<ParamField body="email" type="string" required>
+  Email address to invite. Must be a valid email format. Cannot be the owner's own email.
+</ParamField>
+
+### Response
+
+```json title="201 Created"
+{
+  "ok": true,
+  "inviteSent": true,
+  "emailed": true,
+  "acceptUrl": "https://www.jyuttranslate.com/?invite=<token>#/app",
+  "invite": {
+    "id": "uuid",
+    "email": "friend@example.com",
+    "createdAt": "2024-03-01T12:00:00.000Z",
+    "expiresAt": "2024-03-08T12:00:00.000Z"
+  },
+  "household": { "…": "full household summary" },
+  "entitlement": { "…": "refreshed entitlement" }
+}
+```
+
+<ResponseField name="emailed" type="boolean">
+  `true` if the invite email was successfully sent via Resend. `false` if Resend is not configured — the `acceptUrl` can still be shared manually.
+</ResponseField>
+
+<ResponseField name="acceptUrl" type="string">
+  Deep-link URL containing the one-time invite token. Valid for 7 days.
+</ResponseField>
+
+### Error responses
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| `401`  | —    | Not signed in |
+| `403`  | `plan_required` | Caller is not on a Family or Business plan |
+| `403`  | `forbidden` | Caller is a member, not the owner |
+| `409`  | `seats_full` | All seats (members + pending invites) are occupied |
+| `409`  | `already_invited` | A pending invite already exists for this email |
+| `400`  | `invalid_email` | Email address is malformed |
+| `400`  | `self_invite` | Owner tried to invite their own email |
+
+---
+
+## POST /api/household/accept
+
+Accepts a household invite. Called by the invitee after clicking the invite link or entering the token manually. The caller's Supabase auth email must match the email address the invite was sent to. On success, the invitee joins the household and inherits the owner's plan entitlements.
+
+### Request
+
+```json title="POST /api/household/accept"
+{
+  "token": "<base64url invite token>"
+}
+```
+
+<ParamField body="token" type="string" required>
+  The one-time token from the invite URL (`?invite=<token>`). Tokens expire after 7 days and become invalid after acceptance or revocation.
+</ParamField>
+
+### Response
+
+```json title="200 OK"
+{
+  "ok": true,
+  "household": { "…": "full household summary" },
+  "entitlement": { "…": "refreshed entitlement with owner's plan" }
+}
+```
+
+### Plan inheritance
+
+Once the invite is accepted, the invitee's entitlement is resolved through the household pool. Their plan effectively becomes the owner's plan for the purposes of feature access and usage limits. Usage is deducted from the household's shared monthly pool.
+
+### Error responses
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| `401`  | —    | Not signed in |
+| `400`  | `missing_token` | No token provided |
+| `400`  | `invalid_token` | Token does not match any invite |
+| `400`  | `not_pending` | Invite was already accepted, revoked, or expired |
+| `400`  | `expired` | Token has passed its 7-day expiry |
+| `409`  | `email_mismatch` | Caller's auth email does not match the invited email |
+| `409`  | `already_in_household` | Caller is already a member of a different household |
+| `400`  | `seats_full` | All seats were filled between invite creation and acceptance |
+
+---
+
+## DELETE /api/household/invites/:inviteId
+
+Cancels a pending invite. The invite status is set to `"revoked"` and the seat it occupied is freed. Owner only.
+
+### URL parameters
+
+<ParamField path="inviteId" type="string" required>
+  UUID of the pending invite to revoke.
+</ParamField>
+
+### Response
+
+```json title="200 OK"
+{
+  "ok": true,
+  "household": { "…": "updated household summary" },
+  "entitlement": { "…": "refreshed entitlement" }
+}
+```
+
+### Error responses
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| `401`  | —    | Not signed in |
+| `403`  | `forbidden` | Caller is not the household owner |
+| `404`  | `not_found` | Invite not found in this household or not pending |
+
+---
+
+## DELETE /api/household/members/:userId
+
+Removes a member from the household. The member's `household_members` row is deleted; they immediately lose access to the household's pooled usage and revert to their own personal plan entitlements. Owner only. The owner cannot remove themselves.
+
+### URL parameters
+
+<ParamField path="userId" type="string" required>
+  UUID of the member to remove. Must be a `member`-role row (not the owner).
+</ParamField>
+
+### Response
+
+```json title="200 OK"
+{
+  "ok": true,
+  "household": { "…": "updated household summary" },
+  "entitlement": { "…": "refreshed entitlement" }
+}
+```
+
+### After removal
+
+The removed member's personal `usage_months` attribution rows are preserved for historical display but no longer affect the household's pooled quota. Their `profiles.plan` column is unchanged — they revert to whatever their personal plan was before joining.
+
+### Error responses
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| `401`  | —    | Not signed in |
+| `403`  | `forbidden` | Caller is not the household owner |
+| `400`  | `cannot_remove_owner` | Caller tried to remove themselves |
+| `400`  | `remove_failed` | Database error during removal |
+
+---
+
+## Usage pooling
+
+All household members share one `household_usage_months` row keyed by `(household_id, month)`. Every feature call (live heartbeat, camera scan, TTS, translate, docs) increments the **household** pool via `increment_household_usage` in addition to writing a personal attribution row. Limits are enforced against the pool total — individual members cannot separately exhaust the quota without affecting the others.
+
+<CardGroup cols={2}>
+  <Card title="Family plan" icon="house">
+    4 seats (owner + 3 members). Pooled live minutes, camera scans, TTS chars, and document pages shared across all members.
+  </Card>
+  <Card title="Business plan" icon="building">
+    10 seats (owner + 9 members). Higher per-plan quotas shared across the full team.
+  </Card>
+</CardGroup>

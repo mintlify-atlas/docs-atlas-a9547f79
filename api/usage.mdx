@@ -1,0 +1,165 @@
+---
+title: "Usage Metering: Heartbeat and Meter Tracking"
+sidebarTitle: "Usage"
+description: "POST /api/usage/heartbeat tracks live mic session seconds against the monthly quota. Usage meters update via a Supabase increment function to prevent race conditions."
+---
+
+JyutTranslate meters each feature category independently, persisting monthly counters in the `usage_months` table. Two heartbeat endpoints drive the live-mic and camera session clocks, while a suite of named meters captures every billable or admin-visible event. All counter increments go through the `increment_usage` Postgres RPC so concurrent requests from the same user cannot race-write each other's values.
+
+## POST /api/usage/heartbeat
+
+The web client calls this endpoint on a regular interval while a live microphone session is active. Each call reports how many seconds have elapsed since the previous heartbeat, and the server credits those seconds against the caller's monthly `live_seconds` meter.
+
+**Gate:** `allowed.live` is checked first. If the caller's live entitlement has been exhausted or is not permitted on their plan, the endpoint returns `401` (login required or guest trial done) or `402` (quota exceeded) before writing anything. This prevents the client from accumulating seconds it cannot legitimately spend.
+
+<Note>
+  The `seconds` value is clamped server-side to a maximum of **120** per call. A client cannot advance its meter more than two minutes in a single heartbeat, regardless of what it sends.
+</Note>
+
+### Request
+
+```json title="POST /api/usage/heartbeat"
+{
+  "seconds": 30
+}
+```
+
+<ParamField body="seconds" type="number" required>
+  Seconds elapsed since the last heartbeat. Clamped to `[0, 120]` server-side. Values outside this range are silently adjusted — no error is returned.
+</ParamField>
+
+### Response
+
+The endpoint returns the caller's refreshed entitlement snapshot after crediting the seconds. The `remaining.liveSeconds` field reflects the updated balance.
+
+```json title="200 OK"
+{
+  "ok": true,
+  "plan": "family",
+  "remaining": {
+    "liveSeconds": 14230
+  }
+}
+```
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `401`  | Not signed in, or guest trial is exhausted |
+| `402`  | Monthly live-minute quota exceeded for this plan |
+| `403`  | Account has been disabled |
+
+### Session flush
+
+When the user ends a mic session, the client flushes any remaining in-flight seconds with a final heartbeat. The server then returns an updated entitlement so the UI can reflect the new balance immediately.
+
+---
+
+## POST /api/usage/camera-heartbeat
+
+Records session duration while the Cam AR viewfinder or upload editor is open. Unlike the live heartbeat, this endpoint does **not** gate on scan credits — it is session-duration logging only for admin visibility. Gating on whether the user can access camera features at all still applies, but the endpoint does not block once the camera feature flag is satisfied.
+
+### Request
+
+```json title="POST /api/usage/camera-heartbeat"
+{
+  "seconds": 45
+}
+```
+
+<ParamField body="seconds" type="number" required>
+  Seconds of camera session time elapsed. Clamped to `[0, 120]` server-side.
+</ParamField>
+
+### Response
+
+Returns the caller's entitlement snapshot after crediting `camera_seconds`.
+
+```json title="200 OK"
+{
+  "ok": true,
+  "plan": "free",
+  "remaining": {
+    "cameraSeconds": 3600
+  }
+}
+```
+
+<Note>
+  Camera heartbeat seconds are an **admin-visible log only**. They do not reduce camera scan credits. Scan credits are consumed only by successful `POST /api/camera/scan` calls.
+</Note>
+
+---
+
+## Usage meter fields
+
+Every signed-in user has a row in `usage_months` keyed by `(user_id, month)` where `month` is a `YYYY_MM` string. Household members share a pooled row in `household_usage_months`; personal rows are kept for per-member attribution display.
+
+The `UsageSnapshot` type (returned inside entitlement responses) exposes these fields:
+
+<ResponseField name="liveSeconds" type="number">
+  Cumulative live mic seconds consumed this month. Compared against the plan's `live_seconds` limit to determine `remaining.liveSeconds`.
+</ResponseField>
+
+<ResponseField name="ttsChars" type="number">
+  Cumulative characters synthesised via Azure TTS this month. Free plan has a hard monthly cap (`YUE_FREE_TTS_CHARS`). Family and Business are unlimited.
+</ResponseField>
+
+<ResponseField name="translateCount" type="number">
+  Cumulative text translation and character breakdown calls. Shared counter for `/api/translate`, `/api/breakdown`, and `/api/details/enrich`.
+</ResponseField>
+
+<ResponseField name="cameraSeconds" type="number">
+  Total camera session seconds logged via `/api/usage/camera-heartbeat`. Admin view-only — does not gate camera access.
+</ResponseField>
+
+<ResponseField name="cameraTranslateCount" type="number">
+  Number of successful camera scan calls (`POST /api/camera/scan`). This is the scan-credit counter that enforces `YUE_FREE_CAMERA_SCANS`, `YUE_FAMILY_CAMERA_SCANS`, and `YUE_BUSINESS_CAMERA_SCANS`.
+</ResponseField>
+
+<ResponseField name="docsPages" type="number">
+  Document pages processed this month across `/api/docs/translate`, `/api/docs/segments`, and `/api/docs/commit`. Billed only after a successful job.
+</ResponseField>
+
+<ResponseField name="aiVisionCount" type="number">
+  Multimodal LLM OCR fallback invocations (calligraphy / foil recognition). Hard monthly caps are enforced per plan (`YUE_FREE_AI_VISION_COUNT`, `YUE_FAMILY_AI_VISION_COUNT`, `YUE_BUSINESS_AI_VISION_COUNT`). Admin view-only in the usage dashboard.
+</ResponseField>
+
+<ResponseField name="harborQuestCount" type="number">
+  Harbor Quest correct-answer increments this month. Admin view-only meter — incremented via `PUT /api/harbor-quest` when `correctCount` increases.
+</ResponseField>
+
+<ResponseField name="practicePartnerCount" type="number">
+  Practice Partner LLM chat turns this month. Admin view-only meter — incremented by the Practice Partner AI endpoint.
+</ResponseField>
+
+---
+
+## Concurrent-safe increment function
+
+All counter writes go through the `increment_usage` Postgres RPC instead of a read-modify-write cycle. The function performs an atomic `INSERT … ON CONFLICT DO UPDATE` with additive expressions, so two simultaneous heartbeats cannot overwrite each other.
+
+```sql title="increment_usage (simplified)"
+INSERT INTO usage_months (user_id, month, live_seconds, …)
+VALUES (p_user_id, p_month, p_live_seconds, …)
+ON CONFLICT (user_id, month) DO UPDATE SET
+  live_seconds = usage_months.live_seconds + EXCLUDED.live_seconds,
+  …;
+```
+
+Migrations 003–010 in `supabase/migrations/` introduced and extended this function column by column as new meters were added:
+
+| Migration | Columns added |
+|-----------|---------------|
+| `003_usage_increment.sql` | `live_seconds`, `tts_chars`, `translate_count` |
+| `004_camera_usage.sql` | `camera_seconds`, `camera_translate_count` |
+| `008_docs_pages.sql` | `docs_pages` |
+| `009_tts_voices.sql` | Voice preference columns |
+| `010_ai_vision_usage.sql` | `ai_vision_count` |
+
+If the RPC is unavailable (migration not yet applied), the API falls back to a non-atomic single-column upsert and logs a warning to the console.
+
+<Warning>
+  Household members write to `household_usage_months` (via `increment_household_usage`) and also keep a personal attribution row in `usage_months`. Limits are enforced against the pooled household total — personal rows are for per-member display only.
+</Warning>

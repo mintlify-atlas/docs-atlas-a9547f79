@@ -1,0 +1,208 @@
+---
+title: "POST /api/camera/scan — OCR and Translate Image Regions"
+sidebarTitle: "Camera"
+description: "POST /api/camera/scan runs Azure Vision OCR on a base64 image, translates detected text regions, and returns bounding-box overlays with a LLM fallback."
+---
+
+`POST /api/camera/scan` is the core endpoint powering JyutTranslate's AR camera, Upload, and Documents hybrid modes. It accepts a base64-encoded image, runs Azure AI Vision Read (OCR) to detect text regions with normalized bounding boxes, translates each region using the camera translation pipeline, and returns the original text alongside its translation and geometry. When Azure Read returns no text — common for calligraphy, foil packaging, or decorative signs — the endpoint silently falls back to a multimodal LLM configured via `OPENAI_VISION_MODEL`. A companion endpoint, `POST /api/usage/camera-heartbeat`, logs AR session duration for admin analytics without gating on scan credits.
+
+---
+
+## POST /api/camera/scan
+
+Runs OCR on a base64 image and translates each detected region. The response includes the original OCR text, translated text, and normalized bounding boxes suitable for overlay rendering.
+
+Each successful call with `forDocs: false` costs **1 scan credit** from the caller's `camera_translate_count` quota. When `forDocs: true`, the call bills 1 `docs_pages` credit instead (used during the PDF hybrid flow when rasterized pages need OCR).
+
+<Warning>
+  This endpoint requires `AZURE_VISION_KEY` and `AZURE_VISION_ENDPOINT` pointing to an Azure AI Vision or multi-service resource. The `AZURE_SPEECH_KEY` alone does not grant Vision/OCR access. If credentials are missing or invalid, `visionAuthFailed: true` is returned in the response.
+</Warning>
+
+<Note>
+  The JSON body limit for this endpoint is 12 MB (enforced by `express.json({ limit: '12mb' })`). Base64 encodes at ~1.33× — a 4 MP photo at typical JPEG quality is well under this limit, but very large RAW or uncompressed images should be resized before submission.
+</Note>
+
+### Request
+
+```http
+POST /api/camera/scan
+Content-Type: application/json
+```
+
+<ParamField body="image" type="string" required>
+  The image as a data URL (`data:image/jpeg;base64,...`) or raw base64 string. Minimum 32 characters, maximum 5 500 000 characters (≈ 4 MB binary).
+</ParamField>
+
+<ParamField body="boxes" type="array">
+  Optional array of up to 64 normalized bounding boxes (each `{x, y, w, h}` in the `[0, 1]` coordinate space). When provided, OCR still runs on the full image, but text is assigned to overlapping boxes using IoU matching. Empty-text boxes preserve their geometry for manual fill. When omitted, OCR regions are returned directly.
+  <Expandable title="box schema">
+    <ParamField body="boxes[].x" type="number">Left edge, normalized 0–1.</ParamField>
+    <ParamField body="boxes[].y" type="number">Top edge, normalized 0–1.</ParamField>
+    <ParamField body="boxes[].w" type="number">Width, normalized 0.002–1.</ParamField>
+    <ParamField body="boxes[].h" type="number">Height, normalized 0.002–1.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="target" type="string">
+  Preferred output language for translation. When omitted, the engine auto-detects direction: CJK script → English, Latin script → Cantonese. Accepted values: `en`, `zh`, `yue`, `cmn`, `wuu`, `sichuan`, `tl`, `es`, `eses`, `vi`, `th`, `lo`, `ko`, `ja`, `id`, `ms`, `pt`, `fr`, `hi`, `km`, `my`, `jv`, `it`, `de`, `nl`, `ar`, `arsa`, `ceb`, `ilo`, `bcl`.
+</ParamField>
+
+<ParamField body="ocrOnly" type="boolean" default="false">
+  When `true`, skip translation and return only the raw OCR regions. No scan credit is consumed by this flag — billing still applies on success. Use this for the "Extract text" flow before the user confirms translation.
+</ParamField>
+
+<ParamField body="forDocs" type="boolean" default="false">
+  When `true`, this scan is part of the PDF hybrid Documents flow. Bills 1 `docs_pages` credit instead of a camera scan credit. Requires `allowed.docs` (sign-in required for Documents).
+</ParamField>
+
+### Response
+
+<ResponseField name="regions" type="array" required>
+  Array of translated OCR regions. Each region corresponds to one detected text block (or one client-supplied box when `boxes` was provided).
+  <Expandable title="region fields">
+    <ResponseField name="regions[].id" type="string">
+      Region identifier (e.g. `"r0"`, `"r1"`), derived from detection order.
+    </ResponseField>
+    <ResponseField name="regions[].text" type="string">
+      Original OCR text detected in this region. Empty string for boxes with no matching OCR text.
+    </ResponseField>
+    <ResponseField name="regions[].translated" type="string">
+      Translated text. Empty when `text` is empty or `ocrOnly: true`.
+    </ResponseField>
+    <ResponseField name="regions[].from" type="string">
+      Detected source language for this region (`"yue"` for CJK, `"en"` for Latin, etc.).
+    </ResponseField>
+    <ResponseField name="regions[].to" type="string">
+      Target language used for this region's translation.
+    </ResponseField>
+    <ResponseField name="regions[].box" type="object">
+      Normalized bounding box `{x, y, w, h}` in `[0, 1]` coordinate space. Use these to position overlays on the image.
+    </ResponseField>
+    <ResponseField name="regions[].script" type="string">
+      Detected script family: `"cjk"`, `"mixed"`, `"latin"`, or `"other"`.
+    </ResponseField>
+    <ResponseField name="regions[].cacheHit" type="boolean">
+      `true` when the translation result was served from the in-memory camera translation cache.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="engine" type="string" required>
+  The OCR engine that produced text. `"azure-vision"` for Azure AI Vision Read; the multimodal LLM model name (e.g. `"gpt-4o-mini"`) when the LLM fallback was used; `"demo"` when neither is configured.
+</ResponseField>
+
+<ResponseField name="visionConfigured" type="boolean" required>
+  `true` when `AZURE_VISION_KEY` and `AZURE_VISION_ENDPOINT` are present in the environment.
+</ResponseField>
+
+<ResponseField name="visionAuthFailed" type="boolean">
+  `true` when Azure Vision credentials are set but the API call returned an authentication error. Check that `AZURE_VISION_KEY` is for an AI Vision or multi-service resource — not just the Speech key.
+</ResponseField>
+
+<ResponseField name="translateMisses" type="number" required>
+  Number of regions whose translation required a live LLM call (i.e. not served from the translation cache).
+</ResponseField>
+
+<ResponseField name="aiVisionUsed" type="boolean" required>
+  `true` when the multimodal LLM OCR fallback was invoked because Azure Read returned zero regions.
+</ResponseField>
+
+<ResponseField name="aiVisionRegions" type="number" required>
+  Number of regions recovered by the LLM fallback. `0` when `aiVisionUsed` is `false` or the LLM also returned nothing.
+</ResponseField>
+
+<ResponseField name="aiVisionQuotaExhausted" type="boolean">
+  `true` when the AI Vision fallback was skipped because the caller's monthly `ai_vision_count` hard cap was reached. Azure Read still ran; its empty result stands.
+</ResponseField>
+
+<ResponseField name="entitlement" type="object" required>
+  Updated entitlement snapshot reflecting the scan credit debit.
+</ResponseField>
+
+### Example
+
+```bash
+curl https://api.jyuttranslate.com/api/camera/scan \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<supabase-jwt>" \
+  -d '{
+    "image": "data:image/jpeg;base64,/9j/4AAQSkZJRgAB...",
+    "target": "en"
+  }'
+```
+
+```json title="200 Response"
+{
+  "regions": [
+    {
+      "id": "r0",
+      "text": "出口",
+      "translated": "Exit",
+      "from": "yue",
+      "to": "en",
+      "box": { "x": 0.12, "y": 0.08, "w": 0.30, "h": 0.12 },
+      "script": "cjk",
+      "cacheHit": false
+    }
+  ],
+  "engine": "azure-vision",
+  "visionConfigured": true,
+  "translateMisses": 1,
+  "aiVisionUsed": false,
+  "aiVisionRegions": 0,
+  "entitlement": { "...": "see health & entitlement" }
+}
+```
+
+### AI Vision LLM Fallback
+
+When Azure Read returns zero regions (common for calligraphy, embossed packaging, or foil text), the endpoint automatically calls the multimodal LLM configured via `OPENAI_VISION_MODEL`. Each invocation increments `ai_vision_count` usage against a hard monthly cap:
+
+| Plan | Monthly Cap |
+|------|-------------|
+| Free | 200 (`YUE_FREE_AI_VISION_COUNT`) |
+| Family | 2 000 (`YUE_FAMILY_AI_VISION_COUNT`) |
+| Business | 10 000 (`YUE_BUSINESS_AI_VISION_COUNT`) |
+
+When the cap is reached, `aiVisionQuotaExhausted: true` is returned and Azure Read's empty result stands. The cap can be adjusted via environment variables; see `apps/api/.env.example`.
+
+### Error Responses
+
+| Status | Reason |
+|--------|--------|
+| `401` | `allowed.camera` (or `allowed.docs` for `forDocs: true`) is `false` due to login required or guest trial exhausted |
+| `402` | Scan credits exhausted, or feature not available on the caller's plan |
+| `400` | Zod validation failure (e.g. `boxes` entry out of `[0, 1]` range) |
+| `413` | Request body too large |
+
+---
+
+## POST /api/usage/camera-heartbeat
+
+Logs how many seconds the camera AR view or upload editor was open. This data is for admin analytics only — it writes `cameraSeconds` and does **not** gate on or consume scan credits. Heartbeats arrive at up to 120-second intervals while the camera UI is active.
+
+Requires the `allowed.camera` feature gate (plan has camera enabled and account is not disabled), but does not check remaining scan credits. Returns the updated entitlement snapshot.
+
+### Request
+
+```http
+POST /api/usage/camera-heartbeat
+Content-Type: application/json
+```
+
+<ParamField body="seconds" type="number" required>
+  Seconds to add. Clamped to `[0, 120]` server-side. Fractional values are truncated.
+</ParamField>
+
+### Response
+
+Returns the updated entitlement snapshot (same shape as `/api/entitlement`).
+
+```bash title="Example"
+curl https://api.jyuttranslate.com/api/usage/camera-heartbeat \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<supabase-jwt>" \
+  -d '{"seconds": 30}'
+```

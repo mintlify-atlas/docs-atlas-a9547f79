@@ -1,0 +1,235 @@
+---
+title: "GET /api/speech-token and POST /api/tts"
+sidebarTitle: "TTS & Speech"
+description: "GET /api/speech-token issues an Azure STT token for client-side mic capture. POST /api/tts synthesizes speech across 20+ Azure Neural voice families."
+---
+
+JyutTranslate's audio pipeline is split into two distinct endpoints. `GET /api/speech-token` mints a short-lived Azure Cognitive Services token that the browser-side `microsoft-cognitiveservices-speech-sdk` uses for microphone-based speech-to-text, without ever exposing the raw API key to the client. `POST /api/tts` calls Azure Neural TTS and returns an `audio/mpeg` stream — it supports 24 voice families spanning Cantonese, English, Mandarin, and 20+ additional languages. Voice preferences are persisted per-user via `PATCH /api/prefs/tts-voices`.
+
+---
+
+## GET /api/speech-token
+
+Issues a short-lived Azure Cognitive Services token for client-side speech recognition (STT). The browser SDK (`microsoft-cognitiveservices-speech-sdk`) uses this token directly so the raw `AZURE_SPEECH_KEY` is never transmitted to the client.
+
+Requires the `allowed.live` entitlement gate. On success, the server debits up to `SPEECH_TOKEN_PREPAY_S` (60 seconds) of live time from the caller's monthly quota to prevent token-minting without heartbeats. The token's actual TTL is clamped between `SPEECH_TOKEN_MIN_REMAINING_S` (15 s) and `SPEECH_TOKEN_MAX_TTL_S` (180 s), and is further bounded by the caller's remaining live seconds.
+
+<Warning>
+  `GET /api/speech-token` is rate-limited for guests to `YUE_GUEST_RL_SPEECH_TOKEN_PER_MIN` (default 12) requests per rolling minute per IP. Signed-in users are not subject to this limit.
+</Warning>
+
+```http title="Request"
+GET /api/speech-token
+```
+
+### Response
+
+<ResponseField name="token" type="string" required>
+  The Azure Cognitive Services authorization token. Pass this directly to the `microsoft-cognitiveservices-speech-sdk` `SpeechConfig.fromAuthorizationToken(token, region)` constructor.
+</ResponseField>
+
+<ResponseField name="region" type="string" required>
+  The Azure Speech region (e.g. `"eastasia"`), derived from `AZURE_SPEECH_REGION`. Required alongside `token` when constructing the speech config.
+</ResponseField>
+
+<ResponseField name="expiresIn" type="number" required>
+  Token lifetime in seconds. Between 15 and 180 seconds, clamped to the caller's remaining live quota.
+</ResponseField>
+
+<ResponseField name="prepaidSeconds" type="number" required>
+  Live seconds debited from the caller's quota during this mint. Between 0 (open mode) and 60.
+</ResponseField>
+
+<ResponseField name="entitlement" type="object" required>
+  Updated entitlement snapshot reflecting the prepaid debit.
+</ResponseField>
+
+```bash title="Example"
+curl https://api.jyuttranslate.com/api/speech-token \
+  -H "Cookie: sb-access-token=<supabase-jwt>"
+```
+
+```json title="200 Response"
+{
+  "token": "eyJhbGciOi...",
+  "region": "eastasia",
+  "expiresIn": 60,
+  "prepaidSeconds": 60,
+  "entitlement": { "...": "see health & entitlement" }
+}
+```
+
+### Error Responses
+
+| Status | Reason |
+|--------|--------|
+| `401` | `allowed.live` is `false` and `reason` is `"login_required"` or `"guest_trial_exhausted"` |
+| `402` | Live minutes exhausted for this month, or plan does not include live translation |
+| `503` | `AZURE_SPEECH_KEY` is not configured |
+
+---
+
+## POST /api/tts
+
+Synthesizes speech for a given text string using Azure Neural TTS. Returns raw `audio/mpeg` (MP3) bytes. The API selects the voice based on the `lang` parameter and the caller's saved voice preferences (`ent.prefs.ttsVoice*`), which can be overridden per-request with `voice`.
+
+Requires the `allowed.tts` entitlement gate. The spoken character count is metered against the caller's monthly TTS quota:
+
+- **Free plan**: hard cap at `YUE_FREE_TTS_CHARS` (default 30 000). Calls exceeding the cap are blocked at the gate.
+- **Family / Business**: unlimited, but still counted in `ttsChars` usage.
+- **Guests**: unlimited trial, counted in guest usage.
+
+<Note>
+  Text is capped at 2 000 characters per request, matching the translate endpoint. Requests exceeding this limit receive HTTP 400.
+</Note>
+
+### Request
+
+```http
+POST /api/tts
+Content-Type: application/json
+```
+
+<ParamField body="text" type="string" required>
+  The text to synthesize. Maximum 2 000 characters.
+</ParamField>
+
+<ParamField body="lang" type="string" default="yue">
+  Target language for voice selection. Accepted values: `yue`, `en`, `en-US`, `cmn`, `zh-CN`, `tl`, `fil-PH`, `es`, `es-MX`, `eses`, `es-ES`, `vi`, `vi-VN`, `th`, `th-TH`, `lo`, `lo-LA`, `ko`, `ko-KR`, `ja`, `ja-JP`, `id`, `id-ID`, `ms`, `ms-MY`, `pt`, `pt-BR`, `fr`, `fr-FR`, `hi`, `hi-IN`, `km`, `km-KH`, `my`, `my-MM`, `jv`, `jv-ID`, `it`, `it-IT`, `de`, `de-DE`, `nl`, `nl-NL`, `ar`, `ar-EG`, `arsa`, `ar-SA`.
+</ParamField>
+
+<ParamField body="voice" type="string">
+  Override the default/preferred voice with an explicit Azure voice name. Must pass the type guard for its language family (see voice families below). Rejected voices return HTTP 400.
+</ParamField>
+
+<ParamField body="loud" type="boolean" default="false">
+  When `true`, renders with Azure SSML `volume="x-loud"` for Practice Partner and fill-the-room use cases.
+</ParamField>
+
+### Response
+
+The response body is raw MP3 audio bytes with `Content-Type: audio/mpeg`. There is no JSON wrapper.
+
+```bash title="Example — Cantonese"
+curl https://api.jyuttranslate.com/api/tts \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"text":"你好","lang":"yue"}' \
+  --output output.mp3
+```
+
+```bash title="Example — English with voice override"
+curl https://api.jyuttranslate.com/api/tts \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Hello there","lang":"en","voice":"en-GB-SoniaNeural"}' \
+  --output output.mp3
+```
+
+---
+
+## Supported Voice Families
+
+Each language family is validated by a named type guard exported from `ttsVoices.ts`. All voices are Azure Neural voices.
+
+<Tabs>
+  <Tab title="Cantonese & Mandarin">
+    | Guard | Locale | Voice IDs |
+    |-------|--------|-----------|
+    | `isYueVoice` | `zh-HK` | `zh-HK-HiuMaanNeural` *(default)*, `zh-HK-HiuGaaiNeural`, `zh-HK-WanLungNeural` |
+    | `isCmnVoice` | `zh-CN` | `zh-CN-XiaoxiaoNeural`, `zh-CN-YunxiNeural` |
+    | `isWuuVoice` | `wuu-CN` | `wuu-CN-XiaotongNeural`, `wuu-CN-YunzheNeural` |
+    | `isSichuanVoice` | `zh-CN-sichuan` | `zh-CN-sichuan-YunxiNeural` |
+  </Tab>
+  <Tab title="English">
+    | Guard | Locale | Voice IDs |
+    |-------|--------|-----------|
+    | `isEnVoice` | `en-US`, `en-GB`, `en-AU` | `en-US-JennyNeural` *(default)*, `en-US-GuyNeural`, `en-US-AriaNeural`, `en-GB-SoniaNeural`, `en-GB-RyanNeural`, `en-AU-NatashaNeural` |
+  </Tab>
+  <Tab title="Southeast Asia">
+    | Guard | Locale | Representative Voice IDs |
+    |-------|--------|--------------------------|
+    | `isTlVoice` | `fil-PH` | `fil-PH-BlessicaNeural`, `fil-PH-AngeloNeural` |
+    | `isViVoice` | `vi-VN` | `vi-VN-HoaiMyNeural`, `vi-VN-NamMinhNeural` |
+    | `isThVoice` | `th-TH` | `th-TH-PremwadeeNeural`, `th-TH-NiwatNeural` |
+    | `isLoVoice` | `lo-LA` | `lo-LA-KeomanyNeural`, `lo-LA-ChanthavongNeural` |
+    | `isIdVoice` | `id-ID` | `id-ID-GadisNeural`, `id-ID-ArdiNeural` |
+    | `isMsVoice` | `ms-MY` | `ms-MY-YasminNeural`, `ms-MY-OsmanNeural` |
+    | `isKmVoice` | `km-KH` | `km-KH-SreymomNeural`, `km-KH-PisethNeural` |
+    | `isMyVoice` | `my-MM` | `my-MM-NilarNeural`, `my-MM-ThihaNeural` |
+    | `isJvVoice` | `jv-ID` | `jv-ID-SitiNeural`, `jv-ID-DimasNeural` |
+  </Tab>
+  <Tab title="Spanish & Portuguese">
+    | Guard | Locale | Voice IDs |
+    |-------|--------|-----------|
+    | `isEsVoice` | `es-MX` | `es-MX-DaliaNeural`, `es-MX-JorgeNeural` |
+    | `isEsesVoice` | `es-ES` | `es-ES-ElviraNeural`, `es-ES-AlvaroNeural` |
+    | `isPtVoice` | `pt-BR` | `pt-BR-FranciscaNeural`, `pt-BR-AntonioNeural` |
+  </Tab>
+  <Tab title="More Languages">
+    | Guard | Locale | Voice IDs |
+    |-------|--------|-----------|
+    | `isKoVoice` | `ko-KR` | `ko-KR-SunHiNeural`, `ko-KR-InJoonNeural` |
+    | `isJaVoice` | `ja-JP` | `ja-JP-NanamiNeural`, `ja-JP-KeitaNeural` |
+    | `isFrVoice` | `fr-FR` | `fr-FR-DeniseNeural`, `fr-FR-HenriNeural` |
+    | `isHiVoice` | `hi-IN` | `hi-IN-AnanyaNeural`, `hi-IN-AaravNeural` |
+    | `isItVoice` | `it-IT` | `it-IT-ElsaNeural`, `it-IT-DiegoNeural` |
+    | `isDeVoice` | `de-DE` | `de-DE-KatjaNeural`, `de-DE-ConradNeural` |
+    | `isNlVoice` | `nl-NL` | `nl-NL-FennaNeural`, `nl-NL-MaartenNeural` |
+    | `isArVoice` | `ar-EG` | `ar-EG-SalmaNeural`, `ar-EG-ShakirNeural` |
+    | `isArsaVoice` | `ar-SA` | `ar-SA-ZariyahNeural`, `ar-SA-HamedNeural` |
+  </Tab>
+</Tabs>
+
+---
+
+## Saving Voice Preferences
+
+Voice preferences are synced across devices for signed-in users via `PATCH /api/prefs/tts-voices`. Each field is optional; only the provided voices are updated. Voices are validated against the type guards before saving.
+
+```http
+PATCH /api/prefs/tts-voices
+Content-Type: application/json
+```
+
+<ParamField body="ttsVoiceYue" type="string">
+  Preferred Cantonese voice. Must pass `isYueVoice`. Example: `"zh-HK-WanLungNeural"`.
+</ParamField>
+
+<ParamField body="ttsVoiceEn" type="string">
+  Preferred English voice. Must pass `isEnVoice`. Example: `"en-GB-SoniaNeural"`.
+</ParamField>
+
+<ParamField body="ttsVoiceCmn" type="string">
+  Preferred Mandarin voice. Must pass `isCmnVoice`.
+</ParamField>
+
+```bash title="Example — update Cantonese voice"
+curl https://api.jyuttranslate.com/api/prefs/tts-voices \
+  -X PATCH \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<supabase-jwt>" \
+  -d '{"ttsVoiceYue":"zh-HK-WanLungNeural","ttsVoiceEn":"en-GB-SoniaNeural"}'
+```
+
+```json title="200 Response"
+{
+  "ok": true,
+  "prefs": {
+    "ttsVoiceYue": "zh-HK-WanLungNeural",
+    "ttsVoiceEn": "en-GB-SoniaNeural",
+    "autoSpeak": false,
+    "username": null,
+    "usernameChangedAt": null
+  },
+  "entitlement": { "...": "updated snapshot" }
+}
+```
+
+### TTS Error Responses
+
+| Status | Reason |
+|--------|--------|
+| `400` | `text` is empty or exceeds 2 000 characters, or the `voice` override failed its type guard |
+| `402` | `allowed.tts` is `false` — TTS quota exhausted or plan does not include TTS |
+| `500` | Azure TTS call failed |

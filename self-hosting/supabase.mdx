@@ -1,0 +1,270 @@
+---
+title: "Supabase Setup: Migrations and Auth Hooks"
+sidebarTitle: "Supabase"
+description: "Set up a Supabase project for JyutTranslate, apply the 40-migration schema, and configure auth hooks for user creation and email delivery."
+---
+
+JyutTranslate uses Supabase for authentication, user profiles, usage metering, subscription state, push notification subscriptions, and app-level settings. The schema is managed through an ordered set of SQL migration files in `supabase/migrations/`. Row Level Security (RLS) is enabled on every table; the API always uses the service role key, which bypasses RLS for trusted server-side operations.
+
+---
+
+## Create a Supabase project
+
+<Steps>
+  <Step title="Create a new project">
+    Go to [supabase.com](https://supabase.com), sign in, and click **New project**. Choose an organisation, enter a project name (e.g. `jyuttranslate`), set a strong database password, and select the region closest to your users (East Asia is recommended to match the Azure Speech default region).
+  </Step>
+  <Step title="Copy your project credentials">
+    Navigate to **Project Settings → API**. You will need three values:
+
+    | Credential | Environment variable |
+    |---|---|
+    | **Project URL** | `SUPABASE_URL` / `VITE_SUPABASE_URL` |
+    | **service_role** key | `SUPABASE_SERVICE_ROLE` |
+    | **anon public** key | `SUPABASE_ANON_KEY` / `VITE_SUPABASE_ANON_KEY` |
+
+    The service role key bypasses all RLS policies — keep it server-side only and never expose it to the browser.
+  </Step>
+  <Step title="Add credentials to your environment">
+    Paste the values into `apps/api/.env` for local development, or into **Vercel Dashboard → Project → Settings → Environment Variables** for production:
+
+    ```bash title="apps/api/.env"
+    SUPABASE_URL=https://<project-ref>.supabase.co
+    SUPABASE_SERVICE_ROLE=<service_role_key>
+    SUPABASE_ANON_KEY=<anon_key>
+    ```
+
+    For the web app (baked in at build time):
+
+    ```bash title="apps/web/.env"
+    VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+    VITE_SUPABASE_ANON_KEY=<anon_key>
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Apply migrations
+
+Run the migrations **in order** in the **Supabase Dashboard → SQL Editor** (or via `supabase db push` if you have the Supabase CLI configured). Each file is additive — never skip or re-order them.
+
+<Note>
+  If you see `Could not find the table 'public.households' in the schema cache`, migrations `011`–`015` have not been applied. Run the one-shot file `supabase/migrations/apply_011_through_015_household.sql` in the SQL Editor to catch up, then continue from `016` onward.
+</Note>
+
+<Steps>
+  <Step title="Core schema (001–010)">
+    These migrations create the foundational tables and functions.
+
+    <Accordion title="001 — profiles + usage tables">
+      **File:** `supabase/migrations/001_profiles_usage.sql`
+
+      Creates the `profiles` table (linked 1:1 to `auth.users`, stores `plan`, `stripe_customer_id`, `stripe_subscription_id`) and the `usage_months` table (per-user monthly counters for `live_seconds`, `tts_chars`, and `translate_count`). Enables RLS on both tables and adds a `handle_new_user()` trigger that inserts a Free-plan profile row on every new auth sign-up.
+    </Accordion>
+
+    <Accordion title="002 — admin disabled + audit log">
+      **File:** `supabase/migrations/002_admin_disabled_audit.sql`
+
+      Adds `profiles.disabled` flag and the `admin_audit_log` table for tracking admin actions (plan changes, bans, usage resets).
+    </Accordion>
+
+    <Accordion title="003 — atomic usage increment">
+      **File:** `supabase/migrations/003_usage_increment.sql`
+
+      Ensures the `translate_count` column exists and adds the atomic `increment_usage()` function so concurrent Live, TTS, and translate calls cannot overwrite each other's counters.
+    </Accordion>
+
+    <Accordion title="004 — camera usage">
+      **File:** `supabase/migrations/004_camera_usage.sql`
+
+      Adds `camera_seconds` and `camera_translate_count` columns to `usage_months` and extends `increment_usage()` to support Cam metering.
+    </Accordion>
+
+    <Accordion title="005 — user roles">
+      **File:** `supabase/migrations/005_user_roles.sql`
+
+      Adds an optional `role` column to `profiles` with a check constraint allowing `'admin'` or `'family'`. An index on `role` is created for non-null values. Roles can be assigned in the `#/admin` panel (`PATCH /api/admin/users/:userId/role`).
+    </Accordion>
+
+    <Accordion title="006 — bug reports">
+      **File:** `supabase/migrations/006_bug_reports.sql`
+
+      Creates the `bug_reports` table for signed-in user bug reports submitted from Account Hub or error banners.
+    </Accordion>
+
+    <Accordion title="007 — email hub">
+      **File:** `supabase/migrations/007_email_hub.sql`
+
+      Creates tables for saved campaign email templates and email send log, used by the Admin → Email campaign center.
+    </Accordion>
+
+    <Accordion title="008 — docs pages">
+      **File:** `supabase/migrations/008_docs_pages.sql`
+
+      Adds `docs_pages` metering column to `usage_months` and extends `increment_usage()` to support Documents translation metering.
+    </Accordion>
+
+    <Accordion title="009 — TTS voice preferences">
+      **File:** `supabase/migrations/009_tts_voices.sql`
+
+      Adds TTS voice preference columns to `profiles` for per-user TTS voice selection.
+    </Accordion>
+
+    <Accordion title="010 — AI vision usage">
+      **File:** `supabase/migrations/010_ai_vision_usage.sql`
+
+      Adds `ai_vision_count` to `usage_months` for tracking multimodal LLM OCR fallback usage (Cam + Documents). This is a hard monthly cap configurable via `YUE_FREE_AI_VISION_COUNT`, `YUE_FAMILY_AI_VISION_COUNT`, and `YUE_BUSINESS_AI_VISION_COUNT`.
+    </Accordion>
+  </Step>
+
+  <Step title="Household & plan renames (011–015)">
+    These migrations rename plan IDs and introduce household seat pooling. Apply them together using `apply_011_through_015_household.sql` if any are missing.
+
+    | File | What it does |
+    |---|---|
+    | `011_rename_pro_plan_to_family.sql` | Renames the `pro` plan ID to `family` in `profiles` |
+    | `012_household_seats_pooled_usage.sql` | Creates `households`, `household_members`, `household_invites`, and `household_usage_months` for pooled usage metering |
+    | `013_profiles_username.sql` | Adds a custom `username` field to `profiles` for the Account Hub |
+    | `014_rename_max_plan_to_business.sql` | Renames the `max` plan ID to `business` in `profiles` |
+    | `015_backfill_household_usage_from_legacy.sql` | Folds pre-pooling per-user `usage_months` data into `household_usage_months` (idempotent, safe to re-run) |
+
+    <Tip>
+      After applying migration `015`, run `POST /api/admin/household-usage/backfill` (or click **Backfill household usage** in `#/admin`) on production so historical usage data carries over correctly.
+    </Tip>
+  </Step>
+
+  <Step title="App settings and feature migrations (016–027)">
+
+    | File | What it does |
+    |---|---|
+    | `016_app_settings.sql` | Creates `app_settings` table (key/value, service-role only). Seeds the `incident_banner` setting used by the Admin → Site status toggle. |
+    | `017_guest_usage.sql` | Adds guest trial usage month tracking |
+    | `018_auto_speak.sql` | Adds auto-speak preference to `profiles` |
+    | `019_tts_voice_cmn.sql` | Adds Mandarin TTS voice preference |
+    | `020_tts_voice_tl.sql` | Adds Tagalog TTS voice preference |
+    | `021_translation_history.sql` | Creates cloud history tables for Solo and Conversation modes |
+    | `022_tts_voice_es.sql` | Adds Mexican Spanish TTS voice preference |
+    | `023_tts_voice_vi.sql` | Adds Vietnamese TTS voice preference |
+    | `024_push_notifications.sql` | Creates `push_subscriptions` table for PWA Web Push opt-in records |
+    | `025_guest_identity_anchors.sql` | Adds guest device/network trial anchor tracking |
+    | `025_primary_lang.sql` | Adds primary language preference to Account Hub |
+    | `026_translation_history_ttl.sql` | Adds `prune_stale_translation_history()` function to delete history turns older than 14 days. Optionally enable the commented `pg_cron` daily job on Pro. |
+    | `027_primary_lang_sichuan.sql` | Adds Sichuan (Mandarin) as a primary language option |
+
+  </Step>
+
+  <Step title="Harbor Quest and remaining migrations (028–040)">
+
+    | File | What it does |
+    |---|---|
+    | `028_harbor_quest_progress.sql` | Harbor Quest progress table |
+    | `029_harbor_quest_progress_gear_fields.sql` | Gear / equipment fields on Harbor Quest progress |
+    | `030_harbor_quest_leaderboard.sql` | Harbor Quest global leaderboard |
+    | `031_harbor_quest_xp.sql` | XP (experience points) tracking for Harbor Quest |
+    | `032_tts_voice_eses.sql` | Peninsular Spanish TTS voice preference |
+    | `033_primary_lang_eses.sql` | Peninsular Spanish primary language option |
+    | `034_harbor_practice_usage.sql` | Adds `harbor_quest_count` and `practice_partner_count` meters (admin view-only) |
+    | `035_harbor_quest_progress_service_role_writes.sql` | Grants service role write access for Harbor Quest progress |
+    | `037_practice_partner_leaderboard.sql` | Global Practice Partner leaderboard (XP, best streak, passes) |
+    | `038_primary_lang_en.sql` | Adds English as a valid Account Hub primary language (fixes profile upsert failure) |
+
+    <Note>
+      Some sequence numbers are repeated or non-contiguous in the migrations directory (e.g. two files starting with `025_`, two starting with `037_`, `038_`). Apply every file listed here regardless of numbering gaps.
+    </Note>
+  </Step>
+</Steps>
+
+---
+
+## Row Level Security
+
+All tables created by the migrations have RLS enabled. The key policies created in `001_profiles_usage.sql` are representative of the pattern used throughout:
+
+```sql title="supabase/migrations/001_profiles_usage.sql"
+alter table public.profiles enable row level security;
+alter table public.usage_months enable row level security;
+
+create policy "Users read own profile"
+  on public.profiles for select
+  using (auth.uid() = id);
+
+create policy "Users read own usage"
+  on public.usage_months for select
+  using (auth.uid() = user_id);
+```
+
+Users can only read their own rows. All writes and cross-user reads are performed by the API using the **service role key**, which bypasses RLS entirely. The `app_settings` table (migration `016`) has RLS enabled with no user-facing policies — it is only accessible via the service role.
+
+<Warning>
+  Never expose `SUPABASE_SERVICE_ROLE` to the browser or include it in the web app build. The API server is the only consumer.
+</Warning>
+
+---
+
+## Auth hooks
+
+### Before user created (sign-up notify)
+
+This hook fires before every new user is persisted in `auth.users`. JyutTranslate uses it to send admin notification emails via Resend.
+
+<Steps>
+  <Step title="Register the hook in Supabase">
+    Go to **Supabase Dashboard → Authentication → Hooks → Before user created**.
+    - Type: **HTTPS**
+    - URL: `https://<your-api-host>/api/internal/signup-notify`
+
+    Copy the signing secret shown (format: `v1,whsec_…`).
+  </Step>
+  <Step title="Set the secret on the API">
+    ```bash title="apps/api/.env or Vercel Environment Variables"
+    SUPABASE_AUTH_HOOK_SECRET=v1,whsec_...
+    ```
+    Redeploy the API. The hook must return HTTP 200; the API responds with `{}`.
+  </Step>
+</Steps>
+
+<Note>
+  Do not add an `X-Notify-Secret` header to this hook — Supabase signs Auth Hook requests using Standard Webhooks headers. The `YUE_NOTIFY_WEBHOOK_SECRET` variable is only for the optional Database Webhook fallback path.
+</Note>
+
+### Send Email hook (branded auth emails)
+
+This hook replaces Supabase's built-in mailer for all user-facing auth emails (signup confirmation, magic links, password reset, email change) with branded React Email templates rendered and sent by Resend.
+
+<Steps>
+  <Step title="Ensure Resend is configured">
+    `RESEND_API_KEY` and `YUE_NOTIFY_FROM` must both be set, and the sending domain must be verified in Resend. The `onboarding@resend.dev` sandbox sender only delivers to the Resend account owner — use a verified domain for real users.
+  </Step>
+  <Step title="Register the hook in Supabase">
+    Go to **Supabase Dashboard → Authentication → Hooks → Send Email**.
+    - Type: **HTTPS**
+    - URL: `https://<your-api-host>/api/internal/auth-send-email`
+
+    Copy the signing secret shown.
+  </Step>
+  <Step title="Set the secret on the API">
+    ```bash title="apps/api/.env or Vercel Environment Variables"
+    SUPABASE_SEND_EMAIL_HOOK_SECRET=v1,whsec_...
+    ```
+    Redeploy the API. Supabase will now call this endpoint instead of its built-in mailer for all auth email events.
+  </Step>
+</Steps>
+
+<Info>
+  Email templates live at `apps/api/src/emails/AuthEmail.tsx` and are compiled to plain JS at `emails/compiled/` during deploy. Vercel's Node runtime has no JSX transform — importing `.tsx` directly into the API boot path would crash `/api/health`.
+</Info>
+
+---
+
+## Incident banner (app_settings)
+
+Migration `016` seeds an `incident_banner` row in `app_settings`. Toggle it in `#/admin → Site status → Show incident banner` to display a scrolling bilingual alert across every page. The state is read from `GET /api/health` as `incidentBanner` and toggles are audit-logged.
+
+```sql title="Default incident_banner value (from 016_app_settings.sql)"
+{
+  "enabled": false,
+  "messageEn": "The app is currently experiencing issues and is being worked on.",
+  "messageZh": "應用程式目前出現問題，我們正在處理中。"
+}
+```

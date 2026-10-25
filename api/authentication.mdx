@@ -1,0 +1,291 @@
+---
+title: "API Authentication with Supabase JWT and Guest Tokens"
+sidebarTitle: "Authentication"
+description: "JyutTranslate authenticates API requests using Supabase JWT bearer tokens for signed-in users and cookie/device-based guest identity for unauthenticated access."
+---
+
+JyutTranslate's API supports two distinct identity tracks that co-exist on every request: signed-in users carrying a Supabase JWT, and unauthenticated visitors identified as guests. Both tracks pass through the same middleware chain — there is no separate guest base URL or separate endpoint surface. Whether a specific feature is accessible depends on the entitlement resolution that happens inside each handler, not at the middleware level.
+
+## Signed-In Users — Supabase JWT
+
+Users who authenticate through the PWA receive a Supabase access token. This is a standard RS256-signed JWT issued by your Supabase project.
+
+### Sending the token
+
+Include the token in the `Authorization` header of every request that should be attributed to the signed-in user:
+
+```http title="Authenticated request"
+GET /api/entitlement HTTP/1.1
+Host: www.jyuttranslate.com
+Authorization: Bearer <supabase-access-token>
+```
+
+The value after `Bearer ` is the raw JWT string returned by `supabase.auth.getSession()` or any Supabase sign-in method.
+
+### How the API verifies it
+
+The `attachAuth` middleware in `auth.ts` reads the `Authorization` header on every request. When a `Bearer ` prefix is present, it calls `getUserFromJwt(token)` via the Supabase service-role client. Supabase validates the token signature using the project's JWT secret and returns the user record on success.
+
+```typescript title="apps/api/src/auth.ts (excerpt)"
+export async function attachAuth(req: AuthedRequest, _res: Response, next: NextFunction) {
+  const header = req.headers.authorization
+  if (!header?.startsWith('Bearer ')) {
+    next()
+    return
+  }
+  const token = header.slice('Bearer '.length).trim()
+  if (!token) { next(); return }
+  try {
+    const user = await getUserFromJwt(token)
+    if (user) {
+      req.auth = { userId: user.id, email: user.email ?? null }
+    }
+  } catch {
+    // Invalid token — treat as guest.
+  }
+  next()
+}
+```
+
+If the token is missing, expired, or malformed, the middleware silently treats the request as a guest — it does **not** return a `401` at this stage. Individual handlers call `requireAuth` when their feature mandates a signed-in session.
+
+<Note>
+  The `attachAuth` middleware always calls `next()`. A request with a bad token is downgraded to guest status, not rejected outright. The rejection happens inside the handler if the feature requires login.
+</Note>
+
+### `req.auth` shape
+
+When a valid token is verified, `req.auth` is set on the Express request object:
+
+```typescript
+type AuthContext = {
+  userId: string      // Supabase user UUID
+  email: string | null
+}
+```
+
+Handlers read `req.auth?.userId` to attribute usage, check entitlements, and look up preferences.
+
+---
+
+## Guest Identity
+
+Requests without an `Authorization` header (or with an invalid token) are processed as guests. Every guest request gets a stable, metered identity so trial quotas and rate limits can be enforced consistently — even across IP changes, VPN hops, or cookie wipes.
+
+### Resolution chain
+
+The `resolveGuestIdentity` function in `guestId.ts` resolves the guest identifier in four ordered steps:
+
+<Steps>
+  <Step title="Durable device ID header">
+    The PWA stores a random UUID in `localStorage` and sends it in the `X-Yue-Guest-Device` header on every request. This is the most stable anchor — it survives IP changes, VPN reconnects, and network switches.
+
+    ```http title="Guest request with device header"
+    POST /api/translate HTTP/1.1
+    Host: www.jyuttranslate.com
+    X-Yue-Guest-Device: 550e8400-e29b-41d4-a716-446655440000
+    Content-Type: application/json
+    ```
+
+    The device UUID is hashed with `sha256("yue-guest-device-id-v1|{month}|{deviceId}")` before being stored in `guest_device_trials`. The per-month scoping means a new trial window opens each calendar month.
+  </Step>
+  <Step title="IP/network registry">
+    If no device header is present (or on first encounter), the server checks the `guest_network_trials` table for an existing guest ID bound to `sha256("yue-guest-ip-v1|{month}|{ip}")`. A prior binding for the same network persists even if the guest cleared their cookies.
+  </Step>
+  <Step title="SHA-256 of IP + month (deterministic fallback)">
+    When neither a device binding nor a network registry entry exists, the guest ID is minted deterministically as `sha256("yue-guest-v1|{month}|{ip}")` formatted as a UUID v5. This guarantees the same guest ID is issued for the same IP within a billing month with no database write needed.
+  </Step>
+  <Step title="Register and return">
+    The resolved guest ID is persisted to `guest_network_trials` (insert-only, never overwritten by a device-derived ID, to protect shared NAT scenarios). The device hash is upserted to `guest_device_trials` if a device header was present.
+  </Step>
+</Steps>
+
+### `yue_guest_id` cookie
+
+After resolution, `attachGuest` in `guest.ts` mirrors the resolved guest ID into an HttpOnly cookie named `yue_guest_id`. This serves as a fallback for browsers that cannot set custom request headers.
+
+```
+Set-Cookie: yue_guest_id=<uuid>; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure
+```
+
+The cookie is set with `Secure` on HTTPS connections and `SameSite=Lax` to prevent cross-site leakage. Its `Max-Age` is one year. On sign-in, the guest cookie is cleared and all associated guest usage rows are merged into the user's account.
+
+### Sign-in merge
+
+When `attachGuest` detects a signed-in `req.auth`, it collects every guest ID that may hold trial meters for the current device/network (both the cookie value and any identity candidates from `resolveGuestIdentity`), then calls `mergeGuestUsageIntoUser` for each. This ensures trial usage counted against the guest account is carried forward so it deducts from the user's monthly quota rather than being reset.
+
+---
+
+## Middleware Order
+
+Both middlewares run on every request in the order shown in `app.ts`:
+
+```typescript title="apps/api/src/app.ts (middleware chain)"
+app.use(attachAuth)   // 1. Attach req.auth from Bearer JWT
+app.use(attachGuest)  // 2. Attach req.guestId; merge on sign-in
+```
+
+A request with a valid JWT will have `req.auth` set and `req.guestId` cleared. A request without a JWT will have `req.auth` undefined and `req.guestId` set to the resolved guest UUID.
+
+---
+
+## Endpoints That Require Sign-In
+
+Most endpoints work for both guests and signed-in users, with guests subject to trial quotas. The following features require a valid Supabase JWT (`requireAuth` is called and returns `401` if absent):
+
+<Accordion title="Document translation (allowed.docs)">
+  All three document routes require an authenticated session because document translation is not available on the guest trial:
+
+  - `POST /api/docs/translate`
+  - `POST /api/docs/segments`
+  - `POST /api/docs/commit`
+
+  Unauthenticated requests receive `401` with `message: "Please sign in to translate documents."`.
+</Accordion>
+
+<Accordion title="Auto-speak preference">
+  `PATCH /api/prefs/auto-speak` syncs the preference to the user's Supabase profile. Guest requests in non-open-mode receive `401` with `message: "Sign in to sync Auto-speak."`.
+</Accordion>
+
+<Accordion title="Primary language preference">
+  `PATCH /api/prefs/primary-lang` requires sign-in for cross-device sync. Guest requests in non-open-mode receive `401`.
+</Accordion>
+
+<Accordion title="Username">
+  `PATCH /api/prefs/username` always requires sign-in — there is no guest username concept. Returns `401` when `req.auth` is absent regardless of open mode.
+</Accordion>
+
+<Accordion title="Household management">
+  All `/api/household/*` routes require authentication:
+
+  - `GET /api/household`
+  - `POST /api/household/invites`
+  - `POST /api/household/accept`
+  - `DELETE /api/household/invites/:id`
+  - `DELETE /api/household/members/:userId`
+</Accordion>
+
+<Accordion title="Billing">
+  Stripe Checkout and Customer Portal sessions are tied to a Supabase user ID. Both routes require sign-in:
+
+  - `POST /api/billing/checkout`
+  - `POST /api/billing/portal`
+</Accordion>
+
+<Accordion title="Admin routes">
+  All `/api/admin/*` endpoints require the caller to be signed in **and** appear on the `YUE_ADMIN_EMAILS` allowlist or hold an `admin` role. Signed-in users without admin access receive `403 Admin access required.`
+</Accordion>
+
+---
+
+## Guest Rate Limiting
+
+To prevent abuse from unauthenticated callers, the API maintains in-memory per-IP token buckets for guest requests. Signed-in users are **not** subject to these limits. Defaults come from `env.ts` and can be overridden via environment variables.
+
+| Endpoint bucket | Default limit | Environment variable |
+|---|---|---|
+| `POST /api/translate` | 30 req / min | `YUE_GUEST_RL_TRANSLATE_PER_MIN` |
+| `POST /api/breakdown` | 20 req / min | `YUE_GUEST_RL_BREAKDOWN_PER_MIN` |
+| `GET /api/speech-token` | 12 req / min | `YUE_GUEST_RL_SPEECH_TOKEN_PER_MIN` |
+| `POST /api/camera/scan` | 20 req / min | `YUE_GUEST_RL_CAMERA_SCAN_PER_MIN` |
+
+`POST /api/details/enrich` shares the `breakdown` bucket. TTS (`POST /api/tts`) is intentionally not rate-limited at the IP level — it is metered through guest trial TTS character quotas instead.
+
+When a bucket is full, the handler returns `429`:
+
+```json title="Rate limit response"
+{
+  "message": "Too many requests. Please slow down."
+}
+```
+
+Set any variable to `0` to disable that bucket entirely (useful in open/dev mode).
+
+---
+
+## Code Examples
+
+<Tabs>
+  <Tab title="Authenticated request">
+    A signed-in user fetches their current entitlement by passing the Supabase session token as a Bearer credential.
+
+    ```bash title="Authenticated entitlement fetch"
+    curl https://www.jyuttranslate.com/api/entitlement \
+      -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+    ```
+
+    The response includes `loggedIn: true`, the user's plan, and remaining quota:
+
+    ```json title="Authenticated entitlement response (abbreviated)"
+    {
+      "loggedIn": true,
+      "plan": "family",
+      "allowed": {
+        "live": true,
+        "tts": true,
+        "camera": true,
+        "docs": true,
+        "textTranslate": true
+      },
+      "remaining": {
+        "liveSeconds": 18240,
+        "ttsChars": -1,
+        "cameraScans": 782,
+        "docsPages": 388
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Guest request">
+    A guest browser sends its localStorage device UUID in `X-Yue-Guest-Device`. No `Authorization` header is needed.
+
+    ```bash title="Guest translation request"
+    curl -X POST https://www.jyuttranslate.com/api/translate \
+      -H "Content-Type: application/json" \
+      -H "X-Yue-Guest-Device: 550e8400-e29b-41d4-a716-446655440000" \
+      -d '{"text": "Hello", "from": "en", "to": "yue"}'
+    ```
+
+    The API resolves the guest identity, checks the guest trial quota, and returns the translation if the trial is not exhausted. The response `Set-Cookie` header mirrors the resolved guest ID:
+
+    ```http title="Response headers (excerpt)"
+    Set-Cookie: yue_guest_id=550e8400-e29b-41d4-a716-446655440000; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure
+    ```
+  </Tab>
+  <Tab title="Subsequent guest (cookie only)">
+    After the first response sets the `yue_guest_id` cookie, the browser sends it automatically on subsequent same-origin requests. The `X-Yue-Guest-Device` header from localStorage provides the more durable anchor for native-app-like scenarios.
+
+    ```bash title="Guest request using cookie (browser managed)"
+    curl -X POST https://www.jyuttranslate.com/api/translate \
+      -H "Content-Type: application/json" \
+      -H "Cookie: yue_guest_id=550e8400-e29b-41d4-a716-446655440000" \
+      -d '{"text": "早晨", "from": "yue", "to": "en"}'
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Admin Access
+
+Admin routes use a two-factor check: the caller must be signed in (`requireAuth`) **and** pass `userHasAdminAccess`. Admin access is granted when either condition holds:
+
+1. The authenticated user's email appears in the `YUE_ADMIN_EMAILS` comma-separated list (case-insensitive match).
+2. The user's `profiles.role` column equals `'admin'` in Supabase.
+
+```typescript title="apps/api/src/auth.ts (excerpt)"
+export async function userHasAdminAccess(
+  userId: string,
+  email: string | null | undefined,
+): Promise<boolean> {
+  if (isAdminEmail(email)) return true
+  const profile = await getProfile(userId)
+  return profile?.role === 'admin'
+}
+```
+
+Non-admin authenticated users receive `403 Admin access required.` Role assignment is done via `PATCH /api/admin/users/:userId/role` by an existing admin.
+
+<Warning>
+  Never expose `SUPABASE_SERVICE_ROLE` or `YUE_ADMIN_EMAILS` on the client. These values live only in the API's server environment and are never returned by any public endpoint.
+</Warning>

@@ -1,0 +1,124 @@
+---
+title: "Translation Modes: Solo, Conversation, and Camera"
+sidebarTitle: "Translation Modes"
+description: "JyutTranslate offers Solo text/mic, two-sided Conversation, and Camera AR modes, each backed by phrase memory and a DeepSeek/OpenAI LLM pipeline."
+---
+
+JyutTranslate organises its translation work into three distinct modes — **Solo**, **Conversation**, and **Cam** — accessible from the main tab bar. Solo handles single-user text input and microphone capture. Conversation puts a mic button on each side of the screen for face-to-face dialogue. Cam uses the device camera for AR overlay, image upload, and document translation. All speech-based modes are English ↔ Cantonese (粵) only; the camera and text paths additionally support written Chinese.
+
+## Translation pipeline
+
+Every EN↔粵 translation request passes through the same two-stage pipeline regardless of which mode triggered it.
+
+<Steps>
+  <Step title="Phrase memory (dictionary + lexicon)">
+    The API checks the built-in Cantonese dictionary and lexicon first. A match returns immediately with `engine: "dictionary"` and costs no model tokens. The `dictionaryTranslate()` and `lexiconTranslate()` functions in `apps/api/src/canto/index.ts` handle this stage.
+  </Step>
+  <Step title="LLM fallback">
+    If no phrase-memory hit is found and an OpenAI-compatible key is configured, the request goes to the LLM (e.g. DeepSeek). The response `engine` field reflects the model identifier from `env.openaiBaseUrl` — `"openai-compatible"` when a custom base URL is set, `"openai"` otherwise.
+  </Step>
+  <Step title="Demo mode">
+    When no LLM key is present the API returns the source text prefixed with `（示範）` and sets `engine: "demo"`. This lets you verify routing and UI rendering without billing a model.
+  </Step>
+</Steps>
+
+<Note>
+  The `engine` field in every translate response signals which path was used: `"dictionary"` for a phrase-memory hit, the model name string (e.g. `"openai-compatible"`) for an LLM call, or `"demo"` when no key is configured.
+</Note>
+
+## Checking available engines
+
+Before loading the translator the web app calls `/api/health` to learn which backends are available. The response `engines` object contains:
+
+```json title="GET /api/health → engines"
+{
+  "engines": {
+    "azureSpeech": true,
+    "azureVision": false,
+    "visionLlm": false,
+    "openai": true,
+    "demo": false,
+    "dictionary": true,
+    "lexicon": true
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `azureSpeech` | `AZURE_SPEECH_KEY` is set — mic STT/TTS available |
+| `azureVision` | `AZURE_VISION_KEY` + `AZURE_VISION_ENDPOINT` are set — camera OCR available |
+| `visionLlm` | An `OPENAI_VISION_MODEL` is configured for the AI Vision fallback |
+| `openai` | An OpenAI-compatible LLM key is present |
+| `demo` | Inverse of `openai` — `（示範）` prefix will appear when `true` |
+| `dictionary` | Always `true` — phrase memory is always available |
+| `lexicon` | Always `true` — Cantonese lexicon is always available |
+
+## Solo mode
+
+Solo is the default mode for single-user translation. It supports both typed text and microphone input, and always translates in one direction at a time: English → Cantonese or Cantonese → English.
+
+<CardGroup cols={2}>
+  <Card title="Text input" icon="keyboard">
+    Type or paste up to 2 000 characters. The translate button fires `translateTyped()` in the store, which calls `POST /api/translate` and renders the result with Jyutping ruby when the target is Cantonese.
+  </Card>
+  <Card title="Mic capture" icon="microphone">
+    Tap the mic button to begin Azure STT (`zh-HK` for Cantonese, `en-US` for English). The UI shows a live transcript preview during recording. When the mic is released, one final `translateTyped()` call fires with the complete recognised text — there are no interim machine translations during recording.
+  </Card>
+</CardGroup>
+
+<Info>
+  `translateTyped()` is the shared final translate path used after both manual text entry and post-mic STT capture. It is defined in `apps/web/src/lib/store.ts` and called from both `SoloView.tsx` and `ConversationView.tsx`.
+</Info>
+
+### Solo translate flow
+
+```
+User types / mic captures → STT preview (mic only) → mic releases →
+translateTyped(finalText, lang) → POST /api/translate →
+dictionary hit OR LLM → result with Jyutping + engine tag
+```
+
+## Conversation mode
+
+Conversation mode is designed for real-time face-to-face dialogue between an English speaker and a Cantonese speaker. Each participant has their own mic button positioned on their side of the screen.
+
+<Steps>
+  <Step title="Speaker taps their mic">
+    The microphone on that speaker's side activates. Azure STT begins transcribing in the appropriate language (`en-US` or `zh-HK`).
+  </Step>
+  <Step title="Speech is captured">
+    The live transcript appears as a preview. No translation is run during recording — interim STT text is display-only.
+  </Step>
+  <Step title="Mic releases → one final translation">
+    When the speaker lifts their finger (or ends the hold), `translateTyped()` fires once with the completed STT text. The result appears on the opposite side and includes Jyutping ruby when the target is Cantonese.
+  </Step>
+</Steps>
+
+<Warning>
+  Conversation mode requires `azureSpeech: true` in the health response. Without an `AZURE_SPEECH_KEY` the mic buttons are disabled. Solo text input remains available without Azure Speech.
+</Warning>
+
+## Cam mode
+
+Cam surfaces three sub-modes for visual translation: **AR** (live camera with tap-to-freeze), **Upload** (still image with region drawing), and **Documents** (PDF, DOCX, PPTX, XLSX, TXT with layout preserved).
+
+<Card title="Camera translation" icon="camera" href="/features/camera">
+  AR overlay translation, image upload with region detection, and document OCR are documented in full on the **Camera** page.
+</Card>
+
+## Demo mode and the `（示範）` prefix
+
+When `engines.demo` is `true` — meaning no LLM key is configured — every translation that misses the phrase-memory dictionary returns the source text wrapped in a `（示範）` prefix:
+
+```
+Input:  "Where is the nearest MTR station?"
+Output: "（示範）Where is the nearest MTR station?"
+engine: "demo"
+```
+
+Dictionary hits (`engine: "dictionary"`) are unaffected by demo mode and always return real Cantonese or English. This means common phrases work correctly even without a model key.
+
+<Tip>
+  Run `curl -s http://localhost:8787/api/health | jq .engines` after starting `dev:api` to confirm your key is loaded. `"openai": true` and `"demo": false` means the full LLM path is active.
+</Tip>

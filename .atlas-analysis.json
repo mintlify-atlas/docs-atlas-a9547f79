@@ -1,0 +1,124 @@
+{
+  "projectType": "saas",
+  "projectName": "JyutTranslate",
+  "projectDescription": "A full-stack Cantonese/English speech and camera translation PWA with freemium plans, live mic, AR camera OCR, document translation, and a Jyutping romanization system.",
+  "theme": "luma",
+  "primaryColor": "#1f9f8a",
+  "lightColor": "#07131f",
+  "darkColor": "#eef5f8",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "local-phone-testing"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/translation-modes",
+              "features/jyutping",
+              "features/camera",
+              "features/documents"
+            ]
+          },
+          {
+            "group": "Plans & Metering",
+            "pages": [
+              "plans/overview",
+              "plans/entitlements",
+              "plans/household"
+            ]
+          },
+          {
+            "group": "Self-Hosting",
+            "pages": [
+              "self-hosting/environment",
+              "self-hosting/supabase",
+              "self-hosting/deployment"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/admin-panel",
+              "operations/testing",
+              "operations/android-pwa"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/authentication"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/health",
+              "api/translate",
+              "api/tts-speech",
+              "api/camera",
+              "api/documents",
+              "api/usage",
+              "api/billing",
+              "api/household",
+              "api/harbor-quest"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Live microphone Cantonese ↔ English translation via Azure Speech STT/TTS",
+    "Camera AR mode: point camera, tap shutter, get translated overlays",
+    "Document translation for PDF, DOCX, PPTX, XLSX with layout preservation",
+    "Jyutping romanization with Chao tone letters and character drill-down",
+    "Freemium plans: Guest trial, Free, Family (4 seats), Business (10 seats)",
+    "Pooled household usage metering via Supabase",
+    "Harbor Quest gamified Cantonese learning feature",
+    "Practice Partner AI conversation drill",
+    "PWA installable with Android TWA / Play Store packaging",
+    "Admin panel for user management, usage monitoring, and email campaigns"
+  ],
+  "publicApiSurface": [
+    "GET /api/health",
+    "GET /api/entitlement",
+    "POST /api/translate",
+    "POST /api/tts",
+    "GET /api/speech-token",
+    "POST /api/breakdown",
+    "POST /api/camera/scan",
+    "POST /api/docs/translate",
+    "POST /api/docs/segments",
+    "POST /api/docs/commit",
+    "POST /api/usage/heartbeat",
+    "POST /api/usage/camera-heartbeat",
+    "POST /api/billing/checkout",
+    "POST /api/billing/portal",
+    "GET /api/household",
+    "POST /api/household/invites",
+    "POST /api/household/accept",
+    "GET /api/harbor-quest",
+    "PUT /api/harbor-quest",
+    "GET /api/harbor-quest/leaderboard",
+    "GET /api/history",
+    "PUT /api/history",
+    "POST /api/bug-report",
+    "PATCH /api/prefs/tts-voices",
+    "PATCH /api/prefs/auto-speak"
+  ]
+}

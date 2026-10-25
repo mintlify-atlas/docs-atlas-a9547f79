@@ -1,0 +1,153 @@
+---
+title: "Test JyutTranslate on a Phone with HTTPS Tunnel"
+sidebarTitle: "Phone Testing"
+description: "Use a Cloudflare quick tunnel to expose your local JyutTranslate dev server over HTTPS so mic and camera work on mobile browsers."
+---
+
+Mobile browsers enforce a strict rule called the [Secure Context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) requirement: the microphone, camera, and related device APIs are only available on pages served over `https://` or from `http://localhost`. This means that typing your laptop's LAN IP (`http://192.168.x.x:5173`) into your phone's browser will load the JyutTranslate UI just fine, but the mic button and Cam AR shutter will be silently blocked by the browser. To get a real HTTPS URL without deploying anything, JyutTranslate includes a one-command Cloudflare quick tunnel.
+
+## URL Behaviour at a Glance
+
+| URL | Page loads? | Mic & Camera? |
+|---|---|---|
+| `http://localhost:5173` | ✅ Yes | ✅ Yes — `localhost` is always a secure context |
+| `http://192.168.x.x:5173` | ✅ Yes | ❌ No — plain HTTP over LAN is blocked |
+| Cloudflare quick tunnel (`https://….trycloudflare.com`) | ✅ Yes | ✅ Yes — HTTPS satisfies the secure context |
+
+<Note>
+  Cam AR and Document uploads that need the device camera or file picker follow the same secure-context rules as the mic. The HTTPS tunnel unlocks all three on mobile.
+</Note>
+
+## Setup
+
+<Steps>
+  <Step title="Start the API and web servers">
+    Make sure both dev servers are already running in separate terminals before launching the tunnel:
+
+    ```bash title="Terminal 1 — API server"
+    npm run dev:api
+    ```
+
+    ```bash title="Terminal 2 — Vite dev server"
+    npm run dev:web
+    ```
+  </Step>
+
+  <Step title="Launch the Cloudflare tunnel">
+    In a third terminal, run:
+
+    ```bash title="Terminal 3 — HTTPS tunnel"
+    npm run dev:tunnel
+    ```
+
+    The command starts a Cloudflare quick tunnel on port `5173` and prints a URL similar to:
+
+    ```
+    https://random-words-here.trycloudflare.com
+    ```
+
+    Vite already proxies `/api` requests to `localhost:8787`, so you only need to tunnel the Vite port — there is no need to separately expose the API server.
+
+    <Warning>
+      Every time you run `dev:tunnel` you get a **new** random URL. If you close the terminal and restart the tunnel, you will need to re-open the new URL on your phone.
+    </Warning>
+  </Step>
+
+  <Step title="Open the URL on your phone">
+    Type or scan the printed `https://….trycloudflare.com` URL on your mobile device. When the app first requests the microphone or camera, your browser will show a permission prompt — tap **Allow**.
+  </Step>
+
+  <Step title="(Optional) Add an Azure Speech key for reliable iPhone STT">
+    Without `AZURE_SPEECH_KEY`, the app falls back to the iOS Web Speech API. iOS Web Speech must be triggered inside a tap gesture and is less reliable in practice. For stable speech recognition on iPhone, add your Azure Speech key to `apps/api/.env` and restart `dev:api`:
+
+    ```ini title="apps/api/.env"
+    AZURE_SPEECH_KEY=your-azure-speech-key
+    AZURE_SPEECH_REGION=eastasia
+    ```
+
+    Then restart the API server:
+
+    ```bash
+    # Stop dev:api with Ctrl-C, then:
+    npm run dev:api
+    ```
+  </Step>
+</Steps>
+
+## Real Translation vs. `（示範）`
+
+If translated text on your phone is prefixed with `（示範）`, the API server is running in demo mode — it has no `OPENAI_API_KEY` and the phrase was not found in the built-in dictionary.
+
+<Accordion title="How to confirm and fix demo mode">
+  Check the health endpoint from your laptop (while the tunnel is running):
+
+  ```bash
+  curl -s http://localhost:8787/api/health
+  ```
+
+  You need both of these to be true for full LLM translation:
+
+  ```json
+  {
+    "openai": true,
+    "demo": false,
+    "engine": "openai"
+  }
+  ```
+
+  If you see `"demo": true`, open `apps/api/.env`, add your `OPENAI_API_KEY`, and **restart `dev:api`**. The `.env` key must go in `apps/api/.env` — not in `apps/web/.env` — because the API server handles all LLM calls.
+
+  <Note>
+    Dictionary hits still return real Cantonese text even when `"demo": true`. The `（示範）` prefix only appears on phrases that are not in the built-in phrase memory.
+  </Note>
+</Accordion>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title='"This host is not allowed" error in the browser'>
+    Vite's dev server includes `.trycloudflare.com` and common ngrok domains in its allowed-host list. If you see this error, the Vite process was started before the tunnel config was applied. Stop `dev:web` with `Ctrl-C` and restart it:
+
+    ```bash
+    npm run dev:web
+    ```
+
+    Then reload the tunnel URL on your phone.
+  </Accordion>
+
+  <Accordion title="Tunnel URL loads but translation never returns">
+    The tunnel only forwards port `5173` (the Vite frontend). The API server on port `8787` must also be running locally for translations to work. Check that `npm run dev:api` is active in its terminal and has not crashed. Look for any error output there — a missing environment variable or a port conflict will stop it silently from the Vite side.
+  </Accordion>
+
+  <Accordion title="Microphone is blocked or no speech is detected">
+    Two common causes:
+
+    1. **Wrong URL** — make sure you opened the `https://….trycloudflare.com` URL, not `http://192.168.x.x:5173`. Plain HTTP over LAN will always block the mic.
+    2. **Permission not granted** — if you previously denied the mic permission, you need to reset it. In iOS Safari go to **Settings → Safari → Microphone** and re-allow. In Android Chrome tap the lock icon in the address bar and reset permissions, then reload.
+  </Accordion>
+
+  <Accordion title="Windows Firewall prompt appears">
+    When `npm run dev:tunnel` runs `cloudflared` for the first time, Windows may display a firewall prompt for Node.js or `cloudflared`. Click **Allow access** for private networks to let the tunnel establish a connection. If you accidentally denied it, open **Windows Defender Firewall → Allow an app through firewall** and add `node.exe` and `cloudflared.exe` to the allowed list.
+  </Accordion>
+
+  <Accordion title="Using ngrok instead of Cloudflare">
+    If you prefer ngrok or already have it installed, you can use it as a drop-in replacement:
+
+    ```bash
+    npx --yes ngrok http 5173
+    ```
+
+    Vite's allowed-hosts list includes ngrok domains, so no extra Vite configuration is required. The same HTTPS URL rules apply — copy the `https://` URL ngrok prints and open it on your phone.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Review environment variables and the full local setup process.
+  </Card>
+  <Card title="Translation Modes" icon="language" href="/features/translation-modes">
+    Learn how Solo and Conversation modes work once your phone can access the mic.
+  </Card>
+</CardGroup>

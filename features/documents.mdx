@@ -1,0 +1,175 @@
+---
+title: "Document Translation: PDF, DOCX, PPTX, XLSX"
+sidebarTitle: "Documents"
+description: "Translate PDFs and Office documents with layout preserved. JyutTranslate rewrites OOXML in-place and paints PDF translations at source text positions."
+---
+
+JyutTranslate's Documents feature translates full files while preserving the original layout. Office documents (DOCX, PPTX, XLSX) are rewritten in-place by replacing text nodes inside the existing OOXML structure, so headings, tables, and formatting survive the translation. PDFs follow a hybrid client-side path: the text layer is extracted, translated in batches, and painted back at the exact source positions on a rasterized page image. Plain text files (TXT, MD, CSV) are translated paragraph by paragraph. All file types use the same Cantonese translation pipeline — not a third-party service like DeepL.
+
+## Supported file types
+
+| Extension | Engine | Layout strategy |
+|-----------|--------|-----------------|
+| `.docx` | `docx` | OOXML rewrite — text runs replaced in place |
+| `.pptx` | `pptx` | OOXML rewrite — text frames replaced in place |
+| `.xlsx` | `xlsx` | OOXML rewrite — cell values replaced in place |
+| `.txt` / `.md` / `.csv` | `txt` | Paragraph-by-paragraph text substitution |
+| `.pdf` | Hybrid client | Rasterize page → extract text layer → translate → paint translations at source positions |
+
+<Note>
+  PDF translation is a **hybrid client path**: the browser rasterizes each page, the server translates text segments via `/api/docs/segments`, then the client paints translations at the source coordinates. Scanned PDF pages without a text layer use Azure AI Vision OCR via `/api/camera/scan?forDocs=true`.
+</Note>
+
+## Access gates
+
+Documents require a signed-in account. The **Documents** button in the Cam choice modal is greyed out for guest users regardless of remaining camera scan credits. The `allowed.docs` gate enforces this.
+
+<Warning>
+  Guests cannot use Documents. A sign-in prompt replaces the upload UI when no session is present. Free, Family, and Business plans all have Documents access, subject to the page limits below.
+</Warning>
+
+## Plan limits
+
+| Plan | Documents | Monthly page cap | Counted column |
+|------|-----------|-----------------|----------------|
+| Guest | No | — | — |
+| Free | Yes | 40 pages (`YUE_FREE_DOCS_PAGES`) | `docs_pages` |
+| Family | Yes | 400 pages (`YUE_FAMILY_DOCS_PAGES`) | `docs_pages` |
+| Business | Yes | Unlimited (`docsUnlimited`) | Yes — still tracked |
+
+Page estimates are calculated before the translate call by `estimateDocPages()` in `apps/api/src/docs/pages.ts`. If the estimate exceeds the remaining quota, the API returns HTTP 402 with `pagesNeeded` in the response body before any model calls are made.
+
+## Billing rules
+
+Documents billing is **success-only**. Failed, abandoned, or mid-job calls do not increment the `docs_pages` meter.
+
+<Tabs>
+  <Tab title="Office / TXT">
+    Pages are estimated and billed in a single `POST /api/docs/translate` call on success. The estimate is returned in the response as `pages`.
+  </Tab>
+  <Tab title="PDF">
+    PDFs follow a three-step flow. `POST /api/docs/segments` bills a page estimate per batch during the job. `POST /api/docs/commit` bills the remaining pages (total minus any already pre-billed by segments) after the full client job succeeds. Mid-job `/api/camera/scan?forDocs=true` OCR calls do **not** increment the docs page meter or the camera scan credit meter directly — each forDocs scan increments one docs page.
+  </Tab>
+</Tabs>
+
+## Three-step PDF flow
+
+PDF translation is orchestrated by the browser to keep large files within serverless function size and timeout limits.
+
+<Steps>
+  <Step title="Rasterize and extract">
+    The browser renders each PDF page to a canvas, extracts the text layer coordinates, and sends text segments in batches to `POST /api/docs/segments`. Scanned pages without a text layer are sent as images to `POST /api/camera/scan` with `forDocs: true` for Azure Vision OCR.
+  </Step>
+  <Step title="Translate segments">
+    The server translates each batch and returns `translations[]` in the same order as the input `segments[]`. A page estimate is billed per batch call (`pagesBilled` in the response). Up to 400 segments and 4 000 characters per segment are accepted per call.
+  </Step>
+  <Step title="Paint and commit">
+    The browser paints each translated string at its source position on the rasterized page image, sizing the font to match the original line height. Once all pages are complete, the browser calls `POST /api/docs/commit` with the total page count and `prepaidPages` (already billed via segments). Only the difference is charged.
+  </Step>
+</Steps>
+
+## API endpoints
+
+<ResponseField name="POST /api/docs/translate" type="endpoint">
+  Translates Office and TXT files in a single request. Returns a base64-encoded translated file with the same format as the input. Bills pages on success only. Gate: `allowed.docs`.
+
+  **Request body:**
+  ```json
+  {
+    "filename": "report.docx",
+    "data": "<base64 or data URL>",
+    "from": "en",
+    "to": "yue"
+  }
+  ```
+
+  **Response:**
+  ```json
+  {
+    "filename": "report.yue.docx",
+    "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "dataBase64": "<base64>",
+    "engine": "docx",
+    "segments": 1,
+    "pages": 3
+  }
+  ```
+
+  Maximum file size: **8 MB**. PDF files are rejected with an error message directing clients to use the hybrid path.
+</ResponseField>
+
+<ResponseField name="POST /api/docs/segments" type="endpoint">
+  Translates a batch of plain-text segments for the PDF hybrid flow. Does not bill per call for Office files. Bills an estimated page count for PDF batches. Gate: `allowed.docs`.
+
+  **Request body:**
+  ```json
+  {
+    "segments": ["Hello, world.", "Please take a seat."],
+    "from": "en",
+    "to": "yue"
+  }
+  ```
+
+  **Response:**
+  ```json
+  {
+    "translations": ["你好，世界。", "請坐。"],
+    "from": "en",
+    "to": "yue",
+    "pagesBilled": 1
+  }
+  ```
+
+  Accepts up to **400 segments**, each up to **4 000 characters**.
+</ResponseField>
+
+<ResponseField name="POST /api/docs/commit" type="endpoint">
+  Finalises billing for a completed PDF hybrid job. Accepts the total page count and the number of pages already billed via `/api/docs/segments`; charges only the difference. Requires sign-in (`allowed.docs`).
+
+  **Request body:**
+  ```json
+  {
+    "pages": 5,
+    "prepaidPages": 3
+  }
+  ```
+
+  **Response:**
+  ```json
+  {
+    "ok": true,
+    "pages": 5,
+    "prepaidPages": 3,
+    "pagesBilled": 2
+  }
+  ```
+</ResponseField>
+
+## Camera scan in Documents context
+
+When the Documents flow needs to OCR a scanned PDF page, it calls `POST /api/camera/scan` with `forDocs: true`:
+
+```json title="POST /api/camera/scan (forDocs)"
+{
+  "image": "<base64 page raster>",
+  "forDocs": true
+}
+```
+
+The `forDocs: true` flag:
+- Routes the request through the `allowed.docs` gate instead of `allowed.camera`
+- Does **not** burn a camera scan credit
+- Bills 1 docs page on success
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `YUE_FREE_DOCS_PAGES` | 40 | Monthly page cap for Free plan |
+| `YUE_FAMILY_DOCS_PAGES` | 400 | Monthly page cap for Family plan |
+| `AZURE_VISION_KEY` | — | Required for scanned PDF OCR |
+| `AZURE_VISION_ENDPOINT` | — | Required for scanned PDF OCR |
+
+## Database migration
+
+Document page usage is tracked in the `docs_pages` column, added by migration `008_docs_pages.sql`. Camera scan seconds used during document sessions are tracked separately by `004_camera_usage.sql` (reuses `camera_translate_count`; no new column is introduced for documents camera calls).

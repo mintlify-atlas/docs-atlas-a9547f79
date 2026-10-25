@@ -1,29 +1,32 @@
 ---
-title: "Translation Modes: Solo, Conversation, and Camera"
+title: "JyutTranslate Translation Modes: Solo, Conversation, Cam"
 sidebarTitle: "Translation Modes"
-description: "JyutTranslate offers Solo text/mic, two-sided Conversation, and Camera AR modes, each backed by phrase memory and a DeepSeek/OpenAI LLM pipeline."
+description: "JyutTranslate offers Solo text/mic, two-sided Conversation, and Cam modes, each backed by phrase memory, lexicon, and an OpenAI-compatible LLM pipeline."
 ---
 
 JyutTranslate organises its translation work into three distinct modes — **Solo**, **Conversation**, and **Cam** — accessible from the main tab bar. Solo handles single-user text input and microphone capture. Conversation puts a mic button on each side of the screen for face-to-face dialogue. Cam uses the device camera for AR overlay, image upload, and document translation. All speech-based modes are English ↔ Cantonese (粵) only; the camera and text paths additionally support written Chinese.
 
 ## Translation pipeline
 
-Every EN↔粵 translation request passes through the same two-stage pipeline regardless of which mode triggered it.
+Every EN↔粵 translation request passes through the same pipeline regardless of which mode triggered it.
 
 <Steps>
-  <Step title="Phrase memory (dictionary + lexicon)">
-    The API checks the built-in Cantonese dictionary and lexicon first. A match returns immediately with `engine: "dictionary"` and costs no model tokens. The `dictionaryTranslate()` and `lexiconTranslate()` functions in `apps/api/src/canto/index.ts` handle this stage.
+  <Step title="Dictionary check">
+    The API always checks the built-in Cantonese phrase dictionary first. A match returns immediately with `engine: "dictionary"` and costs no model tokens. The `dictionaryTranslate()` function in `apps/api/src/canto/index.ts` handles this stage.
   </Step>
-  <Step title="LLM fallback">
-    If no phrase-memory hit is found and an OpenAI-compatible key is configured, the request goes to the LLM (e.g. DeepSeek). The response `engine` field reflects the model identifier from `env.openaiBaseUrl` — `"openai-compatible"` when a custom base URL is set, `"openai"` otherwise.
+  <Step title="Lexicon fallback (offline only)">
+    When no LLM key is configured, a secondary lexicon lookup runs via `lexiconTranslate()`. A match returns with `engine: "lexicon"`. Online deployments skip this step so the LLM always handles misses.
+  </Step>
+  <Step title="LLM translation">
+    If dictionary and lexicon both miss and an OpenAI-compatible key is configured, the request goes to the LLM. The response `engine` field reflects the model identifier — `"openai-compatible"` when a custom base URL is set, `"openai"` otherwise.
   </Step>
   <Step title="Demo mode">
-    When no LLM key is present the API returns the source text prefixed with `（示範）` and sets `engine: "demo"`. This lets you verify routing and UI rendering without billing a model.
+    When no LLM key is present and the lexicon also misses, the API returns the source text prefixed with `（示範）` and sets `engine: "demo"`. This lets you verify routing and UI rendering without billing a model.
   </Step>
 </Steps>
 
 <Note>
-  The `engine` field in every translate response signals which path was used: `"dictionary"` for a phrase-memory hit, the model name string (e.g. `"openai-compatible"`) for an LLM call, or `"demo"` when no key is configured.
+  The `engine` field in every translate response signals which path was used: `"dictionary"` for a dictionary hit, `"lexicon"` for a lexicon hit (offline, no LLM key), the model name string (e.g. `"openai-compatible"`) for an LLM call, or `"demo"` when no key is configured.
 </Note>
 
 ## Checking available engines
@@ -76,7 +79,8 @@ Solo is the default mode for single-user translation. It supports both typed tex
 ```
 User types / mic captures → STT preview (mic only) → mic releases →
 translateTyped(finalText, lang) → POST /api/translate →
-dictionary hit OR LLM → result with Jyutping + engine tag
+dictionary hit → OR lexicon hit (offline) → OR LLM → OR demo →
+result with Jyutping + engine tag
 ```
 
 ## Conversation mode
@@ -109,7 +113,7 @@ Cam surfaces three sub-modes for visual translation: **AR** (live camera with ta
 
 ## Demo mode and the `（示範）` prefix
 
-When `engines.demo` is `true` — meaning no LLM key is configured — every translation that misses the phrase-memory dictionary returns the source text wrapped in a `（示範）` prefix:
+When `engines.demo` is `true` — meaning no LLM key is configured — every translation that misses both the dictionary and the lexicon returns the source text wrapped in a `（示範）` prefix (when translating to Cantonese):
 
 ```
 Input:  "Where is the nearest MTR station?"

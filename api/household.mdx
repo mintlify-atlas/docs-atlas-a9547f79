@@ -1,7 +1,7 @@
 ---
-title: "Household API: Seats, Invites, and Members"
+title: "Household API: Family and Business Seat Management"
 sidebarTitle: "Household"
-description: "Manage Family and Business household seats via GET, POST, and DELETE endpoints for invites and members. Owner's Stripe plan applies to all household members."
+description: "Manage Family (4 seats) and Business (10 seats) households. GET retrieves state, POST sends invites, DELETE revokes invites or removes members. Owner only."
 ---
 
 JyutTranslate Family and Business subscribers can share their plan with other users through household seats. The owner sends email invites; invitees accept with a secure token; and usage from all members is pooled against the household's shared monthly quota. All household endpoints require a signed-in user (`Authorization: Bearer <supabase_jwt>`). Seat-management operations (invite, revoke, remove) additionally require the caller to be the household owner.
@@ -68,7 +68,7 @@ Returns the signed-in user's household state. Both owners and members can call t
   <Expandable title="household fields">
     <ResponseField name="id" type="string">UUID of the household row.</ResponseField>
     <ResponseField name="plan" type="string">`"family"` or `"business"`.</ResponseField>
-    <ResponseField name="seatLimit" type="number">Maximum seats for this plan (4 or 10).</ResponseField>
+    <ResponseField name="seatLimit" type="number">Maximum seats for this plan (4 for Family, 10 for Business).</ResponseField>
     <ResponseField name="seatUsed" type="number">Members + pending invites combined.</ResponseField>
     <ResponseField name="role" type="string">`"owner"` or `"member"` for the calling user.</ResponseField>
     <ResponseField name="pooled" type="boolean">Always `true` — usage is pooled across the household.</ResponseField>
@@ -85,10 +85,9 @@ Sends a household invite to an email address. An invite email is dispatched via 
 
 ### Request
 
-```json title="POST /api/household/invites"
-{
-  "email": "friend@example.com"
-}
+```http
+POST /api/household/invites
+Content-Type: application/json
 ```
 
 <ParamField body="email" type="string" required>
@@ -125,7 +124,7 @@ Sends a household invite to an email address. An invite email is dispatched via 
 ### Error responses
 
 | Status | Code | Condition |
-|--------|------|-----------|
+|--------|------|-----------| 
 | `401`  | —    | Not signed in |
 | `403`  | `plan_required` | Caller is not on a Family or Business plan |
 | `403`  | `forbidden` | Caller is a member, not the owner |
@@ -142,10 +141,9 @@ Accepts a household invite. Called by the invitee after clicking the invite link
 
 ### Request
 
-```json title="POST /api/household/accept"
-{
-  "token": "<base64url invite token>"
-}
+```http
+POST /api/household/accept
+Content-Type: application/json
 ```
 
 <ParamField body="token" type="string" required>
@@ -169,7 +167,7 @@ Once the invite is accepted, the invitee's entitlement is resolved through the h
 ### Error responses
 
 | Status | Code | Condition |
-|--------|------|-----------|
+|--------|------|-----------| 
 | `401`  | —    | Not signed in |
 | `400`  | `missing_token` | No token provided |
 | `400`  | `invalid_token` | Token does not match any invite |
@@ -204,7 +202,7 @@ Cancels a pending invite. The invite status is set to `"revoked"` and the seat i
 ### Error responses
 
 | Status | Code | Condition |
-|--------|------|-----------|
+|--------|------|-----------| 
 | `401`  | —    | Not signed in |
 | `403`  | `forbidden` | Caller is not the household owner |
 | `404`  | `not_found` | Invite not found in this household or not pending |
@@ -238,7 +236,7 @@ The removed member's personal `usage_months` attribution rows are preserved for 
 ### Error responses
 
 | Status | Code | Condition |
-|--------|------|-----------|
+|--------|------|-----------| 
 | `401`  | —    | Not signed in |
 | `403`  | `forbidden` | Caller is not the household owner |
 | `400`  | `cannot_remove_owner` | Caller tried to remove themselves |

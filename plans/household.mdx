@@ -1,7 +1,7 @@
 ---
-title: "Household Seats and Pooled Usage for Family Plans"
+title: "Household Seats and Pooled Usage for Family and Business"
 sidebarTitle: "Household"
-description: "Family and Business plans support multiple seats with pooled monthly usage. Learn how to invite members, manage seats, and understand shared meter attribution."
+description: "Family and Business plans share pooled monthly usage across seats. Learn how to invite members, manage seats, and understand shared meter attribution."
 ---
 
 JyutTranslate's Family and Business plans support multi-seat households where every member shares one pooled monthly usage allowance. The plan owner's Stripe subscription governs the entire household — members do not need their own paid plan. This page covers how to invite members, how monthly meters are pooled and attributed, and the full household API surface.
@@ -13,7 +13,7 @@ JyutTranslate's Family and Business plans support multi-seat households where ev
 | **Family** | 4 (owner + 3 members) |
 | **Business** | 10 (owner + 9 members) |
 
-Seat count is enforced at invite time: if all seats are occupied (including pending invites), the invite API returns `seats_full`. The limit is stored in `households.seat_limit` and is automatically synced whenever the owner's Stripe plan changes.
+Seat count is enforced at invite time: if all seats are occupied (including pending invites), the invite API returns `seats_full`. The limit is stored in `households.seat_limit` and is automatically synced whenever the owner's Stripe plan changes via `seatLimitForPlan()` in `household.ts`.
 
 ## How pooled usage works
 
@@ -186,11 +186,11 @@ Content-Type: application/json
 | `409` | `already_in_household` | User is already a member of a different household |
 | `400` | `seats_full` | Household filled up between invite creation and acceptance |
 
-### DELETE /api/household/invites/:id
+### DELETE /api/household/invites/:inviteId
 
 Revokes a pending invite by its ID. Owner only.
 
-```http title="DELETE /api/household/invites/:id"
+```http title="DELETE /api/household/invites/:inviteId"
 DELETE /api/household/invites/invite-uuid
 Authorization: Bearer <session-token>
 ```

@@ -1,5 +1,5 @@
 ---
-title: "Admin Panel: Users, Email, Bug Reports, and Push"
+title: "JyutTranslate Admin: Users, Plans, Email, and Push"
 sidebarTitle: "Admin Panel"
 description: "JyutTranslate's internal admin panel manages user plans, usage resets, bug reports, email campaigns, push notifications, and site-wide incident banners."
 ---
@@ -39,6 +39,13 @@ GET /api/health
 ```
 
 Every toggle is written to the admin audit log under the `incident_banner` action key.
+
+The banner can also be managed directly via the API:
+
+| Method | Path | Purpose |
+|--------|------|---------| 
+| `GET` | `/api/admin/incident-banner` | Read current banner state and message |
+| `PATCH` | `/api/admin/incident-banner` | Enable, disable, or update the banner text |
 
 ## User Roles
 
@@ -163,9 +170,15 @@ The admin **Reports** tab presents a self-diagnostic dashboard with interpreted 
   </Card>
   <Card title="AI Triage" icon="robot">
     ```http
-    POST /api/admin/bug-reports/:id/ai-answer
+    POST /api/admin/bug-reports/:reportId/ai-answer
     ```
     Runs an AI diagnostic pass and recommends close vs. triage.
+  </Card>
+  <Card title="Resend Email" icon="envelope-arrow-right">
+    ```http
+    POST /api/admin/bug-reports/:reportId/resend-email
+    ```
+    Re-sends the admin notification email for a specific bug report — useful when the original delivery failed.
   </Card>
   <Card title="Update Status" icon="pen">
     ```http
@@ -278,6 +291,12 @@ API endpoint: `POST /api/admin/practice-partner/chat` (body: `{ messages, active
 ## User Management Actions
 
 <CardGroup cols={2}>
+  <Card title="Per-User Usage Detail" icon="chart-bar">
+    Returns per-month usage rows plus a range total for a given user. Accepts `from` / `to` query params (`YYYY-MM-DD`); legacy `month=YYYY_MM` still works.
+    ```http
+    GET /api/admin/users/:userId/usage
+    ```
+  </Card>
   <Card title="Reset Month Usage" icon="rotate-left">
     Zeros live / TTS / translate / camera / docs usage for the selected month.
     ```http
@@ -294,6 +313,15 @@ API endpoint: `POST /api/admin/practice-partner/chat` (body: `{ messages, active
     Folds legacy per-user `usage_months` into `household_usage_months`. Idempotent — safe to re-run.
     ```http
     POST /api/admin/household-usage/backfill
+    ```
+  </Card>
+  <Card title="Disable / Enable User" icon="ban">
+    Blocks or unblocks a user. Sets a profile flag and triggers an Auth ban so the session terminates immediately.
+    ```http
+    PATCH /api/admin/users/:userId/disabled
+    ```
+    ```json
+    { "disabled": true }
     ```
   </Card>
   <Card title="Admin Audit Log" icon="scroll">

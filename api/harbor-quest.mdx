@@ -1,7 +1,7 @@
 ---
-title: "Harbor Quest and Practice Partner API"
+title: "Harbor Quest and Practice Partner Leaderboards API"
 sidebarTitle: "Harbor Quest"
-description: "Harbor Quest and Practice Partner endpoints track Cantonese learning progress, XP, leaderboards, and AI conversation drills for signed-in users."
+description: "GET/PUT /api/harbor-quest syncs Cantonese learning progress and XP. POST /api/harbor-quest/gift transfers cosmetics. Practice Partner leaderboard included."
 ---
 
 Harbor Quest is JyutTranslate's Cantonese learning game: a Hong Kong harbour RPG where users earn XP, gold, and cosmetic gear by answering vocabulary questions correctly. Practice Partner is a companion feature providing AI-powered Cantonese conversation drills. Both features maintain global leaderboards and persist progress per signed-in user. All endpoints require a valid Supabase JWT unless otherwise noted.
@@ -77,20 +77,13 @@ Returns the signed-in user's saved Harbor Quest progress blob. If no progress ex
 Saves the user's Harbor Quest progress and syncs the leaderboard row. The server sanitises the incoming blob, computes the correct-answer delta against the stored previous state, and increments `harbor_quest_count` in `usage_months` by the delta.
 
 **Auth required:** Yes.  
-**Rate limit:** 120 PUT requests per minute per user (configurable via `YUE_HARBOR_PUT_RL_PER_MIN`).
+**Rate limit:** `YUE_HARBOR_PUT_RL_PER_MIN` (default 120) PUT requests per minute per user.
 
 ### Request
 
-```json title="PUT /api/harbor-quest"
-{
-  "progress": {
-    "xp": 1500,
-    "gold": 400,
-    "correctCount": 52,
-    "cleared": ["quest-1", "quest-2", "quest-3"],
-    "…": "full progress blob"
-  }
-}
+```http
+PUT /api/harbor-quest
+Content-Type: application/json
 ```
 
 <ParamField body="progress" type="object" required>
@@ -119,7 +112,7 @@ Each PUT call diffs `progress.correctCount` against the previously stored value.
 | Status | Condition |
 |--------|-----------|
 | `401`  | Not signed in |
-| `429`  | Rate limit exceeded (120 PUT/min) |
+| `429`  | Rate limit exceeded |
 | `500`  | Database error saving progress |
 | `503`  | Harbor Quest sync unavailable (database not configured) |
 
@@ -130,16 +123,13 @@ Each PUT call diffs `progress.correctCount` against the previously stored value.
 Sends a cosmetic gift (lantern or title) to another signed-in user. Gifts transfer one item from the sender's inventory to the recipient. XP, gold, and correct-answer counts are never transferred.
 
 **Auth required:** Yes.  
-**Rate limit:** 30 gift requests per minute per user (configurable via `YUE_HARBOR_GIFT_RL_PER_MIN`).
+**Rate limit:** `YUE_HARBOR_GIFT_RL_PER_MIN` (default 30) gift requests per minute per user.
 
 ### Request
 
-```json title="POST /api/harbor-quest/gift"
-{
-  "toUserId": "uuid-of-recipient",
-  "kind": "lantern",
-  "itemId": "lantern-paper-crimson"
-}
+```http
+POST /api/harbor-quest/gift
+Content-Type: application/json
 ```
 
 <ParamField body="toUserId" type="string" required>
@@ -177,6 +167,16 @@ Sends a cosmetic gift (lantern or title) to another signed-in user. Gifts transf
 <ResponseField name="receiverTitleAward" type="string | null">
   Title ID unlocked by the recipient upon receiving the gift, if any.
 </ResponseField>
+
+### Gift error responses
+
+| Status | Condition |
+|--------|-----------|
+| `400`  | Invalid payload — missing `toUserId`, `kind`, or `itemId`; or sender tried to gift themselves |
+| `400`  | Item not in sender's inventory or not a valid game item |
+| `401`  | Not signed in |
+| `429`  | Rate limit exceeded |
+| `503`  | Harbor Quest sync unavailable (open mode has no accounts) |
 
 ---
 
@@ -240,6 +240,12 @@ Returns the global Practice Partner leaderboard ranked by XP (then best streak, 
 
 **IP rate limit:** 180 GET requests per minute.
 
+### Query parameters
+
+<ParamField query="limit" type="number">
+  Number of entries to return. Default `25`, maximum `50`.
+</ParamField>
+
 ### Response
 
 ```json title="200 OK"
@@ -275,12 +281,9 @@ Syncs the caller's Practice Partner score to the leaderboard. The server merges 
 
 ### Request
 
-```json title="PUT /api/practice-partner/leaderboard"
-{
-  "xp": 12500,
-  "bestStreak": 23,
-  "totalPasses": 180
-}
+```http
+PUT /api/practice-partner/leaderboard
+Content-Type: application/json
 ```
 
 <ParamField body="xp" type="number" required>
@@ -316,7 +319,7 @@ Syncs the caller's Practice Partner score to the leaderboard. The server merges 
 
 ## Practice Partner AI chat (admin only)
 
-Direct Practice Partner AI conversation testing is available at `POST /api/admin/practice-partner/chat`. This endpoint is restricted to admin accounts and is intended for scenario testing in the Stripe Dashboard or internal tooling — not for regular user interaction.
+Direct Practice Partner AI conversation testing is available at `POST /api/admin/practice-partner/chat`. This endpoint is restricted to admin accounts and is intended for scenario testing — not for regular user interaction.
 
 Regular users access Practice Partner through the web app at the `#/practice` route inside Account Hub. The web client calls the same underlying AI service via the appropriate signed-in session.
 

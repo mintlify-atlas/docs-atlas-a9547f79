@@ -1,10 +1,10 @@
 ---
-title: "Document Translation API: PDF, DOCX, PPTX, XLSX"
+title: "Document Translation API: PDF, DOCX, PPTX, XLSX, TXT"
 sidebarTitle: "Documents"
-description: "POST /api/docs/translate handles Office and text files. PDF translation uses a two-step flow: POST /api/docs/segments then POST /api/docs/commit after client rendering."
+description: "POST /api/docs/translate handles Office and TXT files up to 8 MB. PDFs use a two-phase flow: /api/docs/segments then /api/docs/commit to finalize billing."
 ---
 
-JyutTranslate's Documents feature translates Office files (DOCX, PPTX, XLSX), plain text (TXT), and PDFs while preserving the original layout. Office and TXT files are handled server-side in a single round-trip via `POST /api/docs/translate`, which rewrites OOXML paragraph text in place and returns a base64-encoded translated file. PDFs use a two-phase client-driven flow: the browser extracts the text layer and sends it to `POST /api/docs/segments` in batches, then calls `POST /api/docs/commit` after the full job succeeds to finalize billing. All three endpoints require the `allowed.docs` entitlement gate, which requires sign-in — guests cannot access Documents.
+JyutTranslate's Documents feature translates Office files (DOCX, PPTX, XLSX), plain text (TXT, MD, CSV), and PDFs while preserving the original layout. Office and TXT files are handled server-side in a single round-trip via `POST /api/docs/translate`, which rewrites OOXML paragraph text in place and returns a base64-encoded translated file. PDFs use a two-phase client-driven flow: the browser extracts the text layer and sends it to `POST /api/docs/segments` in batches, then calls `POST /api/docs/commit` after the full job succeeds to finalize billing. All three endpoints require the `allowed.docs` entitlement gate, which requires sign-in — guests cannot access Documents.
 
 ---
 
@@ -108,7 +108,7 @@ curl https://api.jyuttranslate.com/api/docs/translate \
 
 The first step of the **PDF hybrid translation flow**. The browser extracts the PDF text layer (using a client-side PDF.js renderer), then sends batches of text segments to this endpoint for translation. The server translates them and returns the translated strings aligned to the input order.
 
-The server estimates billable pages from total character count (approximately 1 800 characters per page, minimum 1) and debits `docs_pages` immediately. This prepaid debit is later reconciled by `POST /api/docs/commit`.
+The server estimates billable pages from total character count (approximately 1 800 characters per page, minimum 1 page per call) and debits `docs_pages` immediately. This prepaid debit is later reconciled by `POST /api/docs/commit`.
 
 <Info>
   Unlike `POST /api/docs/translate`, this endpoint accepts raw text strings — not base64 file data. The PDF rendering and layout painting happen entirely client-side; this endpoint only handles the translation of extracted text.

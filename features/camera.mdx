@@ -1,7 +1,7 @@
 ---
-title: "Camera Translation: AR, Upload, and Documents"
+title: "Camera Translation: AR Overlay, Image Upload, and Docs"
 sidebarTitle: "Camera"
-description: "JyutTranslate's camera mode supports AR overlay translation, image upload with region detection, and document OCR using Azure AI Vision with an LLM fallback."
+description: "JyutTranslate's Cam tab supports AR overlay translation, image upload with region detection, and document OCR via Azure AI Vision with an LLM fallback."
 ---
 
 JyutTranslate's **Cam** tab opens a choice modal with three visual translation paths: **AR** (fullscreen live camera with tap-to-freeze OCR), **Upload** (still image with manual or auto-detected region boxes), and **Documents** (PDF, DOCX, PPTX, XLSX, and TXT with layout preserved). All three paths share the same Azure AI Vision OCR backend and the same Cantonese translation pipeline — they differ in how input is captured and how results are presented.
@@ -132,11 +132,15 @@ Gate: allowed.camera  (allowed.docs when forDocs: true)
 Body: {
   image: "<base64 or data URL>",
   boxes?: [{ x, y, w, h }, ...],
-  target?: "en" | "zh",
+  target?: "en" | "yue" | "cmn" | "zh" | "tl" | "es" | "vi" | "th" | ...,
   ocrOnly?: boolean,
   forDocs?: boolean
 }
 ```
+
+<Note>
+  The `target` field accepts the same language codes as the translation API (`en`, `yue`, `cmn`, `tl`, `es`, `eses`, `vi`, `th`, `lo`, `ko`, `ja`, `id`, `ms`, `pt`, `fr`, `hi`, and more). When omitted, the engine detects the script and auto-routes: CJK → English, Latin → Cantonese.
+</Note>
 
 ## Environment variables
 

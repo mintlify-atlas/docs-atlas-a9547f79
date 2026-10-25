@@ -1,7 +1,7 @@
 ---
-title: "Supabase Setup: Migrations and Auth Hooks"
+title: "Supabase Setup for JyutTranslate: Migrations and Auth Hooks"
 sidebarTitle: "Supabase"
-description: "Set up a Supabase project for JyutTranslate, apply the 40-migration schema, and configure auth hooks for user creation and email delivery."
+description: "Set up a Supabase project for JyutTranslate, apply the full 43-file migration schema, and configure auth hooks for user creation and email delivery."
 ---
 
 JyutTranslate uses Supabase for authentication, user profiles, usage metering, subscription state, push notification subscriptions, and app-level settings. The schema is managed through an ordered set of SQL migration files in `supabase/migrations/`. Row Level Security (RLS) is enabled on every table; the API always uses the service role key, which bypasses RLS for trusted server-side operations.
@@ -166,11 +166,16 @@ Run the migrations **in order** in the **Supabase Dashboard → SQL Editor** (or
     | `033_primary_lang_eses.sql` | Peninsular Spanish primary language option |
     | `034_harbor_practice_usage.sql` | Adds `harbor_quest_count` and `practice_partner_count` meters (admin view-only) |
     | `035_harbor_quest_progress_service_role_writes.sql` | Grants service role write access for Harbor Quest progress |
+    | `036_tts_voice_th_lo.sql` | Adds Thai and Lao Azure Neural TTS voice preferences to `profiles` |
     | `037_practice_partner_leaderboard.sql` | Global Practice Partner leaderboard (XP, best streak, passes) |
+    | `037_tts_voice_ko.sql` | Adds Korean Azure Neural TTS voice preference to `profiles` |
     | `038_primary_lang_en.sql` | Adds English as a valid Account Hub primary language (fixes profile upsert failure) |
+    | `038_tts_voice_scaffold_12.sql` | Scaffolds TTS voice preference columns for 12 additional VoiceLang codes (Japanese, etc.) |
+    | `039_primary_lang_all_voice.sql` | Allows every voice-capable language as an Account Hub primary language option |
+    | `040_tts_voice_ar_arsa.sql` | Adds Egyptian Arabic (`ar`) and Modern Standard Arabic (`arsa`) as peer TTS voice options |
 
     <Note>
-      Some sequence numbers are repeated or non-contiguous in the migrations directory (e.g. two files starting with `025_`, two starting with `037_`, `038_`). Apply every file listed here regardless of numbering gaps.
+      Some sequence numbers are repeated or non-contiguous in the migrations directory (e.g. two files starting with `025_`, two starting with `037_`, and two starting with `038_`). Apply every file listed here regardless of numbering gaps.
     </Note>
   </Step>
 </Steps>

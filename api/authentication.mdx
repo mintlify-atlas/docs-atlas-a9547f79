@@ -1,7 +1,7 @@
 ---
 title: "API Authentication with Supabase JWT and Guest Tokens"
 sidebarTitle: "Authentication"
-description: "JyutTranslate authenticates API requests using Supabase JWT bearer tokens for signed-in users and cookie/device-based guest identity for unauthenticated access."
+description: "JyutTranslate API authentication: Supabase JWT bearer tokens for signed-in users and device/network guest identity for unauthenticated visitors."
 ---
 
 JyutTranslate's API supports two distinct identity tracks that co-exist on every request: signed-in users carrying a Supabase JWT, and unauthenticated visitors identified as guests. Both tracks pass through the same middleware chain — there is no separate guest base URL or separate endpoint surface. Whether a specific feature is accessible depends on the entitlement resolution that happens inside each handler, not at the middleware level.
@@ -90,10 +90,10 @@ The `resolveGuestIdentity` function in `guestId.ts` resolves the guest identifie
     The device UUID is hashed with `sha256("yue-guest-device-id-v1|{month}|{deviceId}")` before being stored in `guest_device_trials`. The per-month scoping means a new trial window opens each calendar month.
   </Step>
   <Step title="IP/network registry">
-    If no device header is present (or on first encounter), the server checks the `guest_network_trials` table for an existing guest ID bound to `sha256("yue-guest-ip-v1|{month}|{ip}")`. A prior binding for the same network persists even if the guest cleared their cookies.
+    If no device header is present, the server checks the `guest_network_trials` table for an existing guest ID bound to `sha256("yue-guest-ip-v1|{month}|{ip}")`. A prior binding for the same network persists even if the guest cleared their cookies, ensuring consistent metering across browsers on the same connection.
   </Step>
-  <Step title="SHA-256 of IP + month (deterministic fallback)">
-    When neither a device binding nor a network registry entry exists, the guest ID is minted deterministically as `sha256("yue-guest-v1|{month}|{ip}")` formatted as a UUID v5. This guarantees the same guest ID is issued for the same IP within a billing month with no database write needed.
+  <Step title="Deterministic IP fallback">
+    When neither a device header nor an existing network registry entry is found, the guest ID is minted deterministically as `sha256("yue-guest-v1|{month}|{ip}")` formatted as a UUID. This guarantees the same guest ID for the same IP within a billing month with no database round-trip required.
   </Step>
   <Step title="Register and return">
     The resolved guest ID is persisted to `guest_network_trials` (insert-only, never overwritten by a device-derived ID, to protect shared NAT scenarios). The device hash is upserted to `guest_device_trials` if a device header was present.
@@ -191,11 +191,14 @@ To prevent abuse from unauthenticated callers, the API maintains in-memory per-I
 
 `POST /api/details/enrich` shares the `breakdown` bucket. TTS (`POST /api/tts`) is intentionally not rate-limited at the IP level — it is metered through guest trial TTS character quotas instead.
 
-When a bucket is full, the handler returns `429`:
+When a bucket is full, the handler returns `429` with a `Retry-After` header and a JSON body:
 
 ```json title="Rate limit response"
 {
-  "message": "Too many requests. Please slow down."
+  "message": "Too many requests — wait a moment and try again.",
+  "retryAfterSeconds": 42,
+  "bucket": "translate",
+  "limitPerMinute": 30
 }
 ```
 

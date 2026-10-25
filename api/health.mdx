@@ -1,7 +1,7 @@
 ---
-title: "GET /api/health and /api/entitlement"
-sidebarTitle: "Health & Entitlement"
-description: "GET /api/health returns engine availability and incident banner status. GET /api/entitlement returns the caller's plan, limits, usage, and feature gates."
+title: "JyutTranslate Health and Entitlement API Endpoints"
+sidebarTitle: "Health"
+description: "GET /api/health returns engine flags and entitlement snapshot. GET /api/entitlement refreshes the caller's plan, usage, and feature gates on demand."
 ---
 
 The health and entitlement endpoints are the first calls JyutTranslate's SPA makes on startup. `GET /api/health` is public and requires no authentication — it returns a JSON snapshot of which engines are configured, whether an incident banner is active, and the full entitlement snapshot for the requesting user (or guest). `GET /api/entitlement` returns the same entitlement object in isolation, and is useful for refreshing quota state after a billing event.
@@ -39,10 +39,10 @@ GET /api/health
 <ResponseField name="engines" type="object" required>
   <Expandable title="engines fields">
     <ResponseField name="engines.openai" type="boolean">
-      `true` when an OpenAI-compatible API key is configured. Reflects `openaiConfigured()` — also `true` for local Ollama/LM Studio without a key when a `localhost` base URL is set.
+      `true` when an OpenAI-compatible API key is configured. Also `true` for local Ollama/LM Studio without a key when a `localhost` base URL is set.
     </ResponseField>
     <ResponseField name="engines.demo" type="boolean">
-      `true` when no OpenAI key is present. Translations will carry a `（示範）` prefix. See [resolving demo mode](#demo-mode) below.
+      `true` when no OpenAI key is present. Translations will carry a `（示範）` prefix. See [demo mode](#demo-mode) below.
     </ResponseField>
     <ResponseField name="engines.azureSpeech" type="boolean">
       `true` when `AZURE_SPEECH_KEY` is set.
@@ -108,7 +108,7 @@ curl https://api.jyuttranslate.com/api/health
 
 ## GET /api/entitlement
 
-Returns only the entitlement snapshot for the requesting caller. Requires an active session cookie (signed-in) or a valid guest cookie (`yue_guest_id`). Use this to refresh quota state after upgrading a plan or after a billing webhook fires, without re-fetching the full health payload.
+Returns only the entitlement snapshot for the requesting caller. Works with an active session cookie (signed-in) or a valid guest cookie (`yue_guest_id`). Use this to refresh quota state after upgrading a plan or after a billing webhook fires, without re-fetching the full health payload.
 
 ```http title="Request"
 GET /api/entitlement

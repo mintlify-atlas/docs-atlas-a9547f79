@@ -1,7 +1,7 @@
 ---
-title: "JyutTranslate REST API: Endpoints and Conventions"
+title: "JyutTranslate REST API — Endpoints and Conventions"
 sidebarTitle: "Overview"
-description: "Complete index of JyutTranslate's REST API endpoints, base URLs, response format, and error handling conventions for the Express proxy server."
+description: "Complete index of JyutTranslate's REST API endpoints, base URLs, response format, and error-handling conventions for the Express proxy server."
 ---
 
 JyutTranslate's backend is an Express server that acts as a secure proxy between the React/Vite PWA and upstream services — Azure Speech, Azure AI Vision, OpenAI-compatible LLMs, Supabase, and Stripe. Every route is mounted under the `/api/` prefix and returns JSON unless otherwise noted. Guest and signed-in requests both flow through the same endpoints; entitlement resolution inside each handler decides what is permitted.
@@ -178,7 +178,7 @@ The table below lists every registered route in `app.ts`, grouped by functional 
 | `GET` | `/api/household` | Return the caller's household, seat count, and member list. Requires sign-in. |
 | `POST` | `/api/household/invites` | Send a household invite to another user by email. Requires sign-in. |
 | `POST` | `/api/household/accept` | Accept a pending household invite by token. Requires sign-in. |
-| `DELETE` | `/api/household/invites/:id` | Cancel a pending outbound invite. Requires sign-in. |
+| `DELETE` | `/api/household/invites/:inviteId` | Cancel a pending outbound invite. Requires sign-in. |
 | `DELETE` | `/api/household/members/:userId` | Remove a member from the household. Requires sign-in. |
 
 ### Harbor Quest
@@ -212,6 +212,15 @@ The table below lists every registered route in `app.ts`, grouped by functional 
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/bug-report` | Submit a bug report from the in-app reporter. |
+
+### Internal
+
+These routes are called by Supabase Auth webhooks, not by the PWA directly. They receive a raw body so Supabase's HMAC signature can be verified before parsing.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/internal/signup-notify` | Called by Supabase on new user sign-up — sends welcome email and queues Resend Audience sync. |
+| `POST` | `/api/internal/auth-send-email` | Called by Supabase to deliver auth emails (magic link, OTP) via the configured email provider. |
 
 ### Admin
 

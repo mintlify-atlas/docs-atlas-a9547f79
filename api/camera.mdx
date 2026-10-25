@@ -12,7 +12,7 @@ description: "POST /api/camera/scan runs Azure Vision OCR on a base64 image, tra
 
 Runs OCR on a base64 image and translates each detected region. The response includes the original OCR text, translated text, and normalized bounding boxes suitable for overlay rendering.
 
-Each successful call with `forDocs: false` costs **1 scan credit** from the caller's `camera_translate_count` quota. When `forDocs: true`, the call bills 1 `docs_pages` credit instead (used during the PDF hybrid flow when rasterized pages need OCR).
+Each successful call with `forDocs: false` costs **1 scan credit** from the caller's `camera_translate_count` quota. When `forDocs: true`, the call bills 1 `docs_pages` credit instead (used during the PDF hybrid flow when rasterized pages need OCR). When `aiVisionUsed` is `true`, 1 `ai_vision_count` credit is also debited regardless of the `forDocs` flag.
 
 <Warning>
   This endpoint requires `AZURE_VISION_KEY` and `AZURE_VISION_ENDPOINT` pointing to an Azure AI Vision or multi-service resource. The `AZURE_SPEECH_KEY` alone does not grant Vision/OCR access. If credentials are missing or invalid, `visionAuthFailed: true` is returned in the response.
@@ -48,7 +48,7 @@ Content-Type: application/json
 </ParamField>
 
 <ParamField body="ocrOnly" type="boolean" default="false">
-  When `true`, skip translation and return only the raw OCR regions. No scan credit is consumed by this flag — billing still applies on success. Use this for the "Extract text" flow before the user confirms translation.
+  When `true`, skip translation and return only the raw OCR regions. Scan credits are still consumed on success (the OCR call completes normally).
 </ParamField>
 
 <ParamField body="forDocs" type="boolean" default="false">
@@ -157,7 +157,7 @@ curl https://api.jyuttranslate.com/api/camera/scan \
 
 ### AI Vision LLM Fallback
 
-When Azure Read returns zero regions (common for calligraphy, embossed packaging, or foil text), the endpoint automatically calls the multimodal LLM configured via `OPENAI_VISION_MODEL`. Each invocation increments `ai_vision_count` usage against a hard monthly cap:
+When Azure Read returns zero regions (common for calligraphy, embossed packaging, or foil text), the endpoint automatically calls the multimodal LLM configured via `OPENAI_VISION_MODEL`. Each invocation increments `ai_vision_count` usage against a hard monthly cap. The LLM fallback is only invoked when `allowAiVision` is `true` (i.e. `allowed.aiVision` in the caller's entitlement is set) — if the monthly hard cap has already been reached, `aiVisionQuotaExhausted: true` is returned instead.
 
 | Plan | Monthly Cap |
 |------|-------------|
@@ -182,7 +182,7 @@ When the cap is reached, `aiVisionQuotaExhausted: true` is returned and Azure Re
 
 Logs how many seconds the camera AR view or upload editor was open. This data is for admin analytics only — it writes `cameraSeconds` and does **not** gate on or consume scan credits. Heartbeats arrive at up to 120-second intervals while the camera UI is active.
 
-Requires the `allowed.camera` feature gate (plan has camera enabled and account is not disabled), but does not check remaining scan credits. Returns the updated entitlement snapshot.
+Requires the camera feature flag to be enabled on the plan (`can_camera` limits field is truthy and account is not disabled). Does not check remaining scan credits. Returns the updated entitlement snapshot.
 
 ### Request
 

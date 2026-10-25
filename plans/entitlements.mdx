@@ -1,5 +1,5 @@
 ---
-title: "Entitlements, Usage Gates, and Rate Limits"
+title: "Entitlements, Usage Gates, and Rate Limits in JyutTranslate"
 sidebarTitle: "Entitlements"
 description: "How JyutTranslate resolves plan entitlements per request, guest identity anchoring, per-endpoint usage gates, and in-memory rate limit buckets."
 ---
@@ -8,19 +8,23 @@ Every API request that touches a metered capability first resolves an entitlemen
 
 ## Entitlement snapshot
 
-Both `/api/health` and `/api/entitlement` return the same snapshot object. The example below shows a signed-in Free user two seconds into their first live session this month.
+Both `/api/health` and `/api/entitlement` return the same snapshot object. The example below shows a signed-in Free user two seconds into their first live session this month. The `prefs` object includes voice preferences for all supported languages; only the Cantonese and English fields are shown here for brevity.
 
 ```json title="GET /api/entitlement — Free user example"
 {
   "loggedIn": true,
   "requireLogin": true,
   "plan": "free",
+  "isAdmin": false,
+  "role": null,
+  "disabled": false,
   "limits": {
     "plan": "free",
     "live_minutes": 60,
     "tts_chars": 30000,
     "camera_scans": 120,
     "docs_pages": 40,
+    "ai_vision_count": 200,
     "auto_speak": false,
     "can_live": true,
     "can_camera": true,
@@ -35,7 +39,9 @@ Both `/api/health` and `/api/entitlement` return the same snapshot object. The e
     "cameraSeconds": 40,
     "cameraTranslateCount": 2,
     "docsPages": 4,
-    "aiVisionCount": 2
+    "aiVisionCount": 2,
+    "harborQuestCount": 0,
+    "practicePartnerCount": 0
   },
   "remaining": {
     "liveSeconds": 3480,
@@ -61,12 +67,15 @@ Both `/api/health` and `/api/entitlement` return the same snapshot object. The e
     "ttsVoiceYue": "zh-HK-HiuMaanNeural",
     "ttsVoiceEn": "en-US-JennyNeural",
     "autoSpeak": false,
+    "primaryLang": "yue",
     "username": null,
     "usernameChangedAt": null
   },
   "upgradeUrl": "https://www.jyuttranslate.com/#/pricing",
-  "loginUrl": null,
-  "reason": null
+  "loginUrl": "https://www.jyuttranslate.com/?auth=1#/app",
+  "reason": null,
+  "household": null,
+  "usageSelf": null
 }
 ```
 
@@ -88,12 +97,28 @@ Both `/api/health` and `/api/entitlement` return the same snapshot object. The e
   The effective plan for this request. For household members this is the **owner's** Stripe plan, not the member's personal `profiles.plan` row.
 </ResponseField>
 
+<ResponseField name="isAdmin" type="boolean">
+  `true` when the authenticated user's email is listed in `YUE_ADMIN_EMAILS` or their profile `role` is `admin`.
+</ResponseField>
+
+<ResponseField name="role" type='"admin" | "family" | null'>
+  Assignable profile role shown as a badge in the admin panel. `null` for ordinary users.
+</ResponseField>
+
+<ResponseField name="disabled" type="boolean">
+  `true` when the account has been disabled by an admin. All `allowed` flags are `false` and `reason` is `"account_disabled"`.
+</ResponseField>
+
 <ResponseField name="limits" type="object">
-  Hard caps for the plan. `0` means no hard cap (unlimited). `can_live`, `can_camera`, and `can_docs` are `false` when the feature is disabled by environment flags.
+  Hard caps for the plan. `0` means no hard cap (unlimited). `can_live`, `can_camera`, and `can_docs` are `false` when the feature is disabled by environment flags. Includes `ai_vision_count` — the monthly hard cap for the multimodal LLM OCR fallback.
 </ResponseField>
 
 <ResponseField name="usage" type="object">
-  The caller's cumulative usage for the current calendar month (`YYYY_MM`). For Family and Business members, this reflects the **pooled** `household_usage_months` row, not just the individual member's contribution. The personal share is in `usageSelf` (present when the household has more than one occupied seat).
+  The caller's cumulative usage for the current calendar month (`YYYY_MM`). For Family and Business members, this reflects the **pooled** `household_usage_months` row, not just the individual member's contribution. Includes `harborQuestCount` (Harbor Quest correct answers) and `practicePartnerCount` (Practice Partner chat turns) for admin reporting; these are not gated meters.
+</ResponseField>
+
+<ResponseField name="usageSelf" type="object | null">
+  The individual member's personal share of pooled household usage. Present for Family/Business members when the household has more than one occupied seat. For a solo household (1 occupied seat) this equals the pooled totals. `null` for Free/Guest.
 </ResponseField>
 
 <ResponseField name="remaining" type="object">
@@ -101,7 +126,7 @@ Both `/api/health` and `/api/entitlement` return the same snapshot object. The e
 </ResponseField>
 
 <ResponseField name="ttsUnlimited" type="boolean">
-  `true` for Family and Business. TTS usage is still counted for admin reporting but never blocks the speaker.
+  `true` for Family, Business, and Guest. TTS usage is still counted for admin reporting but never blocks the speaker.
 </ResponseField>
 
 <ResponseField name="cameraUnlimited" type="boolean">
@@ -116,12 +141,16 @@ Both `/api/health` and `/api/entitlement` return the same snapshot object. The e
   Constructed from `YUE_APP_URL` as `{appUrl}/#/pricing`. Embed in UI upgrade prompts.
 </ResponseField>
 
-<ResponseField name="loginUrl" type="string | null">
-  Constructed as `{appUrl}/?auth=1#/app`. `null` for signed-in users.
+<ResponseField name="loginUrl" type="string">
+  Constructed as `{appUrl}/?auth=1#/app`. Always present — use this for sign-in prompts shown to guest users.
 </ResponseField>
 
 <ResponseField name="reason" type="string | null">
   Machine-readable reason why the first exhausted gate fired, e.g. `"live_quota_exhausted"`, `"tts_quota_exhausted"`, `"camera_quota_exhausted"`, `"docs_quota_exhausted"`, `"ai_vision_quota_exhausted"`, `"guest_trial_exhausted"`, `"account_disabled"`. `null` when all gates pass.
+</ResponseField>
+
+<ResponseField name="household" type="object | null">
+  Present when the user owns or belongs to a Family/Business household with pooled usage. Contains `id`, `plan`, `seatLimit`, `seatUsed`, `role`, `members`, and `pendingInvites`. `null` for Free/Guest users.
 </ResponseField>
 
 ## The `allowed` object
@@ -141,11 +170,11 @@ The `allowed` object is the primary gate signal. Endpoints check the relevant bo
 </ResponseField>
 
 <ResponseField name="allowed.tts" type="boolean">
-  `true` for Guest (unlimited trial), Family, Business. For Free: `true` while `remaining.ttsChars > 0`.
+  `true` for Guest (unlimited), Family, and Business. For Free: `true` while `remaining.ttsChars > 0`.
 </ResponseField>
 
 <ResponseField name="allowed.camera" type="boolean">
-  `true` while scan credits remain (`remaining.cameraScans > 0`) or `cameraUnlimited` is set.
+  `true` while scan credits remain (`remaining.cameraScans > 0`) or `cameraUnlimited` is set. Always `false` for Guest when `YUE_GUEST_CAMERA_SCANS` is exhausted.
 </ResponseField>
 
 <ResponseField name="allowed.docs" type="boolean">
@@ -153,12 +182,12 @@ The `allowed` object is the primary gate signal. Endpoints check the relevant bo
 </ResponseField>
 
 <ResponseField name="allowed.aiVision" type="boolean">
-  `true` while `remaining.aiVisionCount > 0`. Hard monthly cap on all plans — never unlimited. Azure Read OCR still runs when this is exhausted; only the multimodal LLM fallback is blocked.
+  `true` while `remaining.aiVisionCount > 0`. Hard monthly cap on all plans — never unlimited. Azure Read OCR still runs when this is exhausted; only the multimodal LLM fallback is blocked. Always `false` for Guest (`limits.ai_vision_count: 0`).
 </ResponseField>
 
 ## The `prefs` object
 
-User preferences synced across devices via `PATCH /api/prefs/auto-speak` and related endpoints. Guests receive default values and cannot persist preferences.
+User preferences synced across devices. Guests receive default values and cannot persist preferences. The full `prefs` object includes a voice preference field for each supported language (`ttsVoiceYue`, `ttsVoiceEn`, `ttsVoiceCmn`, `ttsVoiceTl`, `ttsVoiceEs`, `ttsVoiceEses`, `ttsVoiceVi`, `ttsVoiceTh`, `ttsVoiceLo`, `ttsVoiceKo`, `ttsVoiceJa`, `ttsVoiceId`, `ttsVoiceMs`, `ttsVoicePt`, `ttsVoiceFr`, `ttsVoiceHi`, `ttsVoiceKm`, `ttsVoiceMy`, `ttsVoiceJv`, `ttsVoiceIt`, `ttsVoiceDe`, `ttsVoiceNl`, `ttsVoiceAr`, `ttsVoiceArsa`). Update them via `PATCH /api/prefs/auto-speak` and related endpoints.
 
 <ResponseField name="prefs.ttsVoiceYue" type="string">
   Azure Neural voice name for Cantonese TTS (e.g. `"zh-HK-HiuMaanNeural"`).
@@ -170,6 +199,10 @@ User preferences synced across devices via `PATCH /api/prefs/auto-speak` and rel
 
 <ResponseField name="prefs.autoSpeak" type="boolean">
   Cross-device Auto-speak preference stored in `profiles.auto_speak`. Playback is still gated by `allowed.autoSpeak` (Family/Business only).
+</ResponseField>
+
+<ResponseField name="prefs.primaryLang" type="string">
+  The user's primary language for Solo/Conversation/Cam (`yue` by default). Must be one of the supported primary language codes (e.g. `"yue"`, `"en"`, `"cmn"`, `"tl"`, `"es"`, etc.).
 </ResponseField>
 
 <ResponseField name="prefs.username" type="string | null">
@@ -188,7 +221,7 @@ Usage writes go through the `increment_usage` Supabase RPC (migrations `003`–`
 |---|---|
 | `GET /api/speech-token` | `allowed.live` — prepaid ≤ 60 s live debit, TTL ≤ 180 s |
 | `POST /api/usage/heartbeat` | `allowed.live`, then adds seconds |
-| `POST /api/tts` | Free: `remaining.ttsChars`; Family/Business: always passes (usage counted) |
+| `POST /api/tts` | Free: `remaining.ttsChars`; Family/Business/Guest: always passes (usage counted) |
 | `POST /api/translate` | `allowed.textTranslate` (guests OK); increments `translateCount` |
 | `POST /api/breakdown` | Same as `/translate` |
 | `POST /api/camera/scan` | `allowed.camera` (scan credits) — or `allowed.docs` when `forDocs: true` (no camera scan charge) |

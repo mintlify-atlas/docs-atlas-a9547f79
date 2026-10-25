@@ -1,7 +1,7 @@
 ---
-title: "Test JyutTranslate on a Phone with HTTPS Tunnel"
+title: "Test JyutTranslate on a Mobile Phone via HTTPS Tunnel"
 sidebarTitle: "Phone Testing"
-description: "Use a Cloudflare quick tunnel to expose your local JyutTranslate dev server over HTTPS so mic and camera work on mobile browsers."
+description: "Use a Cloudflare quick tunnel to expose your local JyutTranslate dev server over HTTPS so mic and camera permissions work on mobile browsers."
 ---
 
 Mobile browsers enforce a strict rule called the [Secure Context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) requirement: the microphone, camera, and related device APIs are only available on pages served over `https://` or from `http://localhost`. This means that typing your laptop's LAN IP (`http://192.168.x.x:5173`) into your phone's browser will load the JyutTranslate UI just fine, but the mic button and Cam AR shutter will be silently blocked by the browser. To get a real HTTPS URL without deploying anything, JyutTranslate includes a one-command Cloudflare quick tunnel.

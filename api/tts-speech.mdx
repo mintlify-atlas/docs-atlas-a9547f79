@@ -1,7 +1,7 @@
 ---
-title: "GET /api/speech-token and POST /api/tts"
+title: "Azure Speech Token and TTS Synthesis API Endpoints"
 sidebarTitle: "TTS & Speech"
-description: "GET /api/speech-token issues an Azure STT token for client-side mic capture. POST /api/tts synthesizes speech across 20+ Azure Neural voice families."
+description: "GET /api/speech-token mints a short-lived Azure STT token with 60 s prepaid debit. POST /api/tts streams audio/mpeg across 24+ Azure Neural voice families."
 ---
 
 JyutTranslate's audio pipeline is split into two distinct endpoints. `GET /api/speech-token` mints a short-lived Azure Cognitive Services token that the browser-side `microsoft-cognitiveservices-speech-sdk` uses for microphone-based speech-to-text, without ever exposing the raw API key to the client. `POST /api/tts` calls Azure Neural TTS and returns an `audio/mpeg` stream — it supports 24 voice families spanning Cantonese, English, Mandarin, and 20+ additional languages. Voice preferences are persisted per-user via `PATCH /api/prefs/tts-voices`.
@@ -33,11 +33,11 @@ GET /api/speech-token
 </ResponseField>
 
 <ResponseField name="expiresIn" type="number" required>
-  Token lifetime in seconds. Between 15 and 180 seconds, clamped to the caller's remaining live quota.
+  Token lifetime in seconds. Clamped between `SPEECH_TOKEN_MIN_REMAINING_S` (15 s) and `SPEECH_TOKEN_MAX_TTL_S` (180 s), and further bounded by the caller's remaining live quota.
 </ResponseField>
 
 <ResponseField name="prepaidSeconds" type="number" required>
-  Live seconds debited from the caller's quota during this mint. Between 0 (open mode) and 60.
+  Live seconds debited from the caller's quota during this mint. Between 0 (open mode) and `SPEECH_TOKEN_PREPAY_S` (60 s).
 </ResponseField>
 
 <ResponseField name="entitlement" type="object" required>
@@ -95,7 +95,7 @@ Content-Type: application/json
 </ParamField>
 
 <ParamField body="lang" type="string" default="yue">
-  Target language for voice selection. Accepted values: `yue`, `en`, `en-US`, `cmn`, `zh-CN`, `tl`, `fil-PH`, `es`, `es-MX`, `eses`, `es-ES`, `vi`, `vi-VN`, `th`, `th-TH`, `lo`, `lo-LA`, `ko`, `ko-KR`, `ja`, `ja-JP`, `id`, `id-ID`, `ms`, `ms-MY`, `pt`, `pt-BR`, `fr`, `fr-FR`, `hi`, `hi-IN`, `km`, `km-KH`, `my`, `my-MM`, `jv`, `jv-ID`, `it`, `it-IT`, `de`, `de-DE`, `nl`, `nl-NL`, `ar`, `ar-EG`, `arsa`, `ar-SA`.
+  Target language for voice selection. Accepted values: `yue`, `en`, `en-US`, `cmn`, `zh-CN`, `zh-Hans`, `tl`, `fil-PH`, `es`, `es-MX`, `eses`, `es-ES`, `vi`, `vi-VN`, `th`, `th-TH`, `lo`, `lo-LA`, `ko`, `ko-KR`, `ja`, `ja-JP`, `id`, `id-ID`, `ms`, `ms-MY`, `pt`, `pt-BR`, `fr`, `fr-FR`, `hi`, `hi-IN`, `km`, `km-KH`, `my`, `my-MM`, `jv`, `jv-ID`, `it`, `it-IT`, `de`, `de-DE`, `nl`, `nl-NL`, `ar`, `ar-EG`, `arsa`, `ar-SA`, `wuu`, `wuu-CN`, `sichuan`, `zh-CN-sichuan`.
 </ParamField>
 
 <ParamField body="voice" type="string">
@@ -185,7 +185,7 @@ Each language family is validated by a named type guard exported from `ttsVoices
 
 ## Saving Voice Preferences
 
-Voice preferences are synced across devices for signed-in users via `PATCH /api/prefs/tts-voices`. Each field is optional; only the provided voices are updated. Voices are validated against the type guards before saving.
+Voice preferences are synced across devices for signed-in users via `PATCH /api/prefs/tts-voices`. Each field is optional; only the provided voices are updated. Voices are validated against the type guards before saving. Requires sign-in — open mode echoes back the validated prefs without persisting to Supabase.
 
 ```http
 PATCH /api/prefs/tts-voices
@@ -202,6 +202,90 @@ Content-Type: application/json
 
 <ParamField body="ttsVoiceCmn" type="string">
   Preferred Mandarin voice. Must pass `isCmnVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceTl" type="string">
+  Preferred Tagalog voice. Must pass `isTlVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceEs" type="string">
+  Preferred Mexican Spanish voice. Must pass `isEsVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceEses" type="string">
+  Preferred Peninsular Spanish voice. Must pass `isEsesVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceVi" type="string">
+  Preferred Vietnamese voice. Must pass `isViVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceTh" type="string">
+  Preferred Thai voice. Must pass `isThVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceLo" type="string">
+  Preferred Lao voice. Must pass `isLoVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceKo" type="string">
+  Preferred Korean voice. Must pass `isKoVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceJa" type="string">
+  Preferred Japanese voice. Must pass `isJaVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceId" type="string">
+  Preferred Indonesian voice. Must pass `isIdVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceMs" type="string">
+  Preferred Malay voice. Must pass `isMsVoice`.
+</ParamField>
+
+<ParamField body="ttsVoicePt" type="string">
+  Preferred Portuguese (BR) voice. Must pass `isPtVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceFr" type="string">
+  Preferred French voice. Must pass `isFrVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceHi" type="string">
+  Preferred Hindi voice. Must pass `isHiVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceKm" type="string">
+  Preferred Khmer voice. Must pass `isKmVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceMy" type="string">
+  Preferred Burmese voice. Must pass `isMyVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceJv" type="string">
+  Preferred Javanese voice. Must pass `isJvVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceIt" type="string">
+  Preferred Italian voice. Must pass `isItVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceDe" type="string">
+  Preferred German voice. Must pass `isDeVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceNl" type="string">
+  Preferred Dutch voice. Must pass `isNlVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceAr" type="string">
+  Preferred Egyptian Arabic voice. Must pass `isArVoice`.
+</ParamField>
+
+<ParamField body="ttsVoiceArsa" type="string">
+  Preferred Modern Standard Arabic voice. Must pass `isArsaVoice`.
 </ParamField>
 
 ```bash title="Example — update Cantonese voice"

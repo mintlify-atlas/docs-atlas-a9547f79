@@ -1,7 +1,7 @@
 ---
 title: "Billing API: Stripe Checkout, Portal, and Webhooks"
 sidebarTitle: "Billing"
-description: "POST /api/billing/checkout starts a Stripe Checkout session with promotion codes enabled. /api/billing/webhook handles subscription lifecycle events to update user plans."
+description: "POST /api/billing/checkout creates a Stripe Checkout session with promo codes. /api/billing/webhook handles subscription events to update user plan status."
 ---
 
 JyutTranslate uses Stripe for subscription billing. Three endpoints cover the complete subscription lifecycle: starting a checkout, managing an active subscription via the customer portal, and receiving webhook events from Stripe to keep the database plan column in sync. All billing endpoints require a signed-in user; the webhook endpoint additionally verifies a Stripe signature before processing any event.
@@ -19,6 +19,8 @@ STRIPE_PRICE_BUSINESS_MONTH=price_…
 STRIPE_PRICE_BUSINESS_YEAR=price_…
 ```
 
+Legacy aliases are also accepted for backward compatibility: `STRIPE_PRICE_PRO_MONTH` / `STRIPE_PRICE_PRO_YEAR` map to the Family plan, and `STRIPE_PRICE_MAX_MONTH` / `STRIPE_PRICE_MAX_YEAR` map to the Business plan.
+
 <Warning>
   If any of the `STRIPE_PRICE_*` variables are missing for a given plan, `POST /api/billing/checkout` returns `400 { message: "Price is not configured for this plan." }` rather than creating a broken session.
 </Warning>
@@ -35,18 +37,16 @@ Creates a Stripe Checkout session in `subscription` mode and returns the hosted 
 
 ### Request
 
-```json title="POST /api/billing/checkout"
-{
-  "plan": "family",
-  "interval": "month"
-}
+```http
+POST /api/billing/checkout
+Content-Type: application/json
 ```
 
 <ParamField body="plan" type="string" required>
   Subscription plan. Accepted values: `"family"` or `"business"`. Legacy aliases `"pro"` (→ family) and `"max"` (→ business) are also accepted for backward compatibility.
 </ParamField>
 
-<ParamField body="interval" type="string">
+<ParamField body="interval" type="string" default="month">
   Billing interval. `"month"` (default) or `"year"`. Determines which Stripe Price ID is used.
 </ParamField>
 
@@ -140,8 +140,10 @@ Receives raw Stripe webhook events, verifies the `Stripe-Signature` header again
 </Accordion>
 
 <Accordion title="customer.subscription.deleted">
-  Fires when a subscription is cancelled or enters `canceled`/`unpaid` status. The handler downgrades the user to the `"free"` plan and clears `stripe_subscription_id`. Usage counters are not reset — the user's history is preserved.
+  Fires when a subscription is cancelled or enters `canceled` or `unpaid` status. The handler downgrades the user to the `"free"` plan and clears `stripe_subscription_id`. Usage counters are not reset — the user's history is preserved.
 </Accordion>
+
+Any other event type is acknowledged with `200 { received: true }` without modification to the database.
 
 ### Plan propagation to households
 

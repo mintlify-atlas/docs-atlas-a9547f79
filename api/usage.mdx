@@ -1,7 +1,7 @@
 ---
-title: "Usage Metering: Heartbeat and Meter Tracking"
+title: "Usage Metering: Live and Camera Heartbeat Endpoints"
 sidebarTitle: "Usage"
-description: "POST /api/usage/heartbeat tracks live mic session seconds against the monthly quota. Usage meters update via a Supabase increment function to prevent race conditions."
+description: "POST /api/usage/heartbeat tracks live mic session seconds against the monthly quota. Both heartbeat endpoints return the full updated entitlement snapshot."
 ---
 
 JyutTranslate meters each feature category independently, persisting monthly counters in the `usage_months` table. Two heartbeat endpoints drive the live-mic and camera session clocks, while a suite of named meters captures every billable or admin-visible event. All counter increments go through the `increment_usage` Postgres RPC so concurrent requests from the same user cannot race-write each other's values.
@@ -10,7 +10,7 @@ JyutTranslate meters each feature category independently, persisting monthly cou
 
 The web client calls this endpoint on a regular interval while a live microphone session is active. Each call reports how many seconds have elapsed since the previous heartbeat, and the server credits those seconds against the caller's monthly `live_seconds` meter.
 
-**Gate:** `allowed.live` is checked first. If the caller's live entitlement has been exhausted or is not permitted on their plan, the endpoint returns `401` (login required or guest trial done) or `402` (quota exceeded) before writing anything. This prevents the client from accumulating seconds it cannot legitimately spend.
+**Gate:** `allowed.live` is checked first. If the caller's live entitlement has been exhausted or is not permitted on their plan, the endpoint returns `401` (login required or guest trial done) or `402` (quota exceeded or account disabled) before writing anything. This prevents the client from accumulating seconds it cannot legitimately spend.
 
 <Note>
   The `seconds` value is clamped server-side to a maximum of **120** per call. A client cannot advance its meter more than two minutes in a single heartbeat, regardless of what it sends.
@@ -18,10 +18,9 @@ The web client calls this endpoint on a regular interval while a live microphone
 
 ### Request
 
-```json title="POST /api/usage/heartbeat"
-{
-  "seconds": 30
-}
+```http
+POST /api/usage/heartbeat
+Content-Type: application/json
 ```
 
 <ParamField body="seconds" type="number" required>
@@ -30,15 +29,17 @@ The web client calls this endpoint on a regular interval while a live microphone
 
 ### Response
 
-The endpoint returns the caller's refreshed entitlement snapshot after crediting the seconds. The `remaining.liveSeconds` field reflects the updated balance.
+The endpoint returns the caller's refreshed entitlement snapshot (same shape as `GET /api/entitlement`) after crediting the seconds. The `remaining.liveSeconds` field reflects the updated balance.
 
 ```json title="200 OK"
 {
-  "ok": true,
+  "loggedIn": true,
   "plan": "family",
   "remaining": {
     "liveSeconds": 14230
-  }
+  },
+  "allowed": { "live": true },
+  "...": "full entitlement snapshot"
 }
 ```
 
@@ -47,8 +48,7 @@ The endpoint returns the caller's refreshed entitlement snapshot after crediting
 | Status | Condition |
 |--------|-----------|
 | `401`  | Not signed in, or guest trial is exhausted |
-| `402`  | Monthly live-minute quota exceeded for this plan |
-| `403`  | Account has been disabled |
+| `402`  | Monthly live-minute quota exceeded or account disabled |
 
 ### Session flush
 
@@ -58,14 +58,13 @@ When the user ends a mic session, the client flushes any remaining in-flight sec
 
 ## POST /api/usage/camera-heartbeat
 
-Records session duration while the Cam AR viewfinder or upload editor is open. Unlike the live heartbeat, this endpoint does **not** gate on scan credits — it is session-duration logging only for admin visibility. Gating on whether the user can access camera features at all still applies, but the endpoint does not block once the camera feature flag is satisfied.
+Records session duration while the Cam AR viewfinder or upload editor is open. Unlike the live heartbeat, this endpoint does **not** gate on scan credits — it is session-duration logging only for admin visibility. Gating on whether the user can access camera features at all still applies (plan must have `can_camera` and account must not be disabled), but the endpoint does not block once the camera feature flag is satisfied.
 
 ### Request
 
-```json title="POST /api/usage/camera-heartbeat"
-{
-  "seconds": 45
-}
+```http
+POST /api/usage/camera-heartbeat
+Content-Type: application/json
 ```
 
 <ParamField body="seconds" type="number" required>
@@ -74,15 +73,16 @@ Records session duration while the Cam AR viewfinder or upload editor is open. U
 
 ### Response
 
-Returns the caller's entitlement snapshot after crediting `camera_seconds`.
+Returns the caller's entitlement snapshot (same shape as `GET /api/entitlement`) after crediting `camera_seconds`.
 
 ```json title="200 OK"
 {
-  "ok": true,
+  "loggedIn": true,
   "plan": "free",
   "remaining": {
-    "cameraSeconds": 3600
-  }
+    "cameraScans": 118
+  },
+  "...": "full entitlement snapshot"
 }
 ```
 
